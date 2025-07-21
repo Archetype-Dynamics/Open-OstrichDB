@@ -1,0 +1,32 @@
+# Compiled binaries
+*.bin
+*.so
+*.exe
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Bin directory exclusions
+bin/*.bin
+bin/main.bin
+bin/.env
+bin/projects/
+bin/project.json
+bin/backups/
+bin/collections/
+bin/temp/
+bin/logs/
+bin/tmp/
+bin/system/
+
+# Allow specific Go and Odin source files
+!main/main.odin
+
+# System and IDE files
+.DS_Store
+.ropeproject
+*.key
+*.ostrichdb
+*project.json

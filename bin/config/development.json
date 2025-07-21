@@ -1,0 +1,14 @@
+{
+  "server": {
+    "port": 8042,
+    "host": "0.0.0.0"
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "./logs/server.log",
+    "console": true
+  },
+  "database": {
+    "path": "./data"
+  }
+}

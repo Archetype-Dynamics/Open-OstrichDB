@@ -1,0 +1,87 @@
+{
+  "_copyright": "Copyright (c) 2025-Present Marshall A Burns and Archetype Dynamics, Inc.",
+  "_license": "BSL-1.1",
+
+  "server": {
+    "port": 8042,
+    "host": "0.0.0.0",
+    "bindAddress": "0.0.0.0",
+    "maxConnections": 1000,
+    "requestTimeoutSeconds": 60,
+    "backlogSize": 50,
+    "apiVersion": "v1",
+    "filePath": "/var/log/ostrichdb/ostrich.server.log"
+  },
+  "database": {
+    "projectsBasePath": "/var/lib/ostrichdb/",
+    "systemBasePath": "/var/lib/ostrichdb/system/",
+    "maxFileSizeMb": 1000,
+    "maxProjectsPerUser": 50,
+    "backupEnabled": true,
+    "backupIntervalHours": 6,
+    "autoCleanupTempFiles": true,
+    "tempFileRetentionHours": 24
+  },
+  "projects": {
+    "allowPublicProjects": false,
+    "defaultStorageQuotaMb": 5000,
+    "maxCollectionsPerProject": 100,
+    "maxClustersPerCollection": 200,
+    "maxRecordsPerCluster": 5000,
+    "projectIdLength": 16,
+    "allowCustomProjectIds": false
+  },
+  "authentication": {
+    "jwtSecret": "${JWT_SECRET}",
+    "jwtExpirationHours": 8,
+    "requireApiKey": true,
+    "apiKeyHeaderName": "X-API-Key",
+    "allowAnonymousProjects": false
+  },
+  "logging": {
+    "level": "INFO",
+    "filePath": "/var/log/ostrichdb/ostrich.runtime.log",
+    "consoleOutput": false,
+    "maxFileSizeMb": 200,
+    "rotateFiles": true,
+    "maxRotatedFiles": 10,
+    "logProjectOperations": true,
+    "auditTrail": true
+  },
+  "cors": {
+    "allowedOrigins": [
+      "https://ostrichdb.com",
+      "https://www.ostrichdb.com",
+      "https://app.ostrichdb.com",
+      "https://ostrichdb-production.up.railway.app"
+    ],
+    "allowedMethods": ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"],
+    "allowedHeaders": ["Content-Type", "Authorization", "authorization", "X-Requested-With", "X-API-Key"],
+    "exposeHeaders": ["X-Project-Id", "X-Resource-Count"],
+    "maxAgeSeconds": 3600,
+    "allowCredentials": true
+  },
+  "security": {
+    "rateLimitRequestsPerMinute": 200,
+    "maxRequestBodySizeMb": 50,
+    "enableAuth": true,
+    "encryptionEnabled": true,
+    "allowCrossProjectAccess": false,
+    "requireProjectOwnership": true
+  },
+  "features": {
+    "enableProjectSharing": false,
+    "enableCollectionTemplates": true,
+    "enableDataValidation": true,
+    "enableQueryOptimization": true,
+    "enableRealTimeUpdates": false,
+    "enableBackgroundTasks": true
+  },
+  "monitoring": {
+    "enableMetrics": true,
+    "metricsPort": 8043,
+    "enableHealthCheck": true,
+    "healthCheckPath": "/health",
+    "trackPerformance": true
+  }
+}
