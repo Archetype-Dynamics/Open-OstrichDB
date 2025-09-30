@@ -9,18 +9,13 @@ Author: Marshall A Burns
 GitHub: @SchoolyB
 
 Copyright (c) 2025-Present Marshall A Burns and Archetype Dynamics, Inc.
+All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+This software is proprietary and confidential. Unauthorized copying,
+distribution, modification, or use of this software, in whole or in part,
+is strictly prohibited without the express written permission of
+Archetype Dynamics, Inc.
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 
 File Description:
             This file contains all the logic for interacting with
@@ -28,32 +23,15 @@ File Description:
 *********************************************************/
 //GENERAL TYPES START
 
-StandardUserCredential :: struct {
-	Value:  string, //username
-	Length: int, //length of the username
-}
-
-SpecialUserCredential :: struct {
-	valAsBytes: []u8,
-	valAsStr:   string,
-}
-
 User :: struct {
-	user_id:        i64,
-	role:           StandardUserCredential,
-	username:       StandardUserCredential,
-	password:       StandardUserCredential,
-	salt:           SpecialUserCredential,
-	hashedPassword: SpecialUserCredential, //this is the hashed password without the salt
-	store_method:   int,
-	m_k:            SpecialUserCredential, //master key
+    id, email: string
+    //Todo: Add more??
 }
 
-
-IdType :: enum{
-    UserID = 0,
-    ClusterID,
-    RecordID
+RateLimitInfo :: struct {
+    count: int,
+    windowStart: time.Time,
+    lastRequest: time.Time,
 }
 
 
@@ -65,62 +43,12 @@ HashMethod :: enum {
     SHA512_256
 }
 
-system_user: User = { 	//OstrichDB itself
-	user_id = -1,
-	username = StandardUserCredential{Value = "OstrichDB", Length = 11},
-	m_k = SpecialUserCredential {
-		valAsBytes = []u8 {
-			0x8F,
-			0x2A,
-			0x1D,
-			0x5E,
-			0x9C,
-			0x4B,
-			0x7F,
-			0x3A,
-			0x6D,
-			0x0E,
-			0x8B,
-			0x2C,
-			0x5F,
-			0x9A,
-			0x7D,
-			0x4E,
-			0x1B,
-			0x3C,
-			0x6A,
-			0x8D,
-			0x2E,
-			0x5F,
-			0x7C,
-			0x9B,
-			0x4A,
-			0x1D,
-			0x8E,
-			0x3F,
-			0x6C,
-			0x9B,
-			0x2A,
-			0x5,
-		},
-		valAsStr = "8F2A1D5E9C4B7F3A6D0E8B2C5F9A7D4E1B3C6A8D2E5F7C9B4A1D8E3F6C9B2A5",
-	},
-}
-
 OstrichDBEngine:: struct{
     EngineRuntime: time.Duration,
     Server: Server
     //more??
 }
 //GENERAL TYPES END
-
-
-//DATA RELATED TYPES START
-DataStructureTier :: enum {
-    COLLECTION = 0,
-    CLUSTER,
-    RECORD,
-}
 
 CollectionType :: enum {
     STANDARD = 0 ,
@@ -344,7 +272,6 @@ ServerSession :: struct {
 
 
 ServerEvent :: struct {
-	name:           string,
 	description:    string,
 	type:           ServerEventType,
 	timestamp:      time.Time,
@@ -357,7 +284,8 @@ ServerEventType :: enum {
 	ROUTINE = 0,
 	WARNING,
 	ERROR,
-	CRITICAL_ERROR
+	CRITICAL_ERROR,
+	SUCCESS
 }
 //For error logging
 
@@ -372,62 +300,9 @@ CorsOptions :: struct {
 }
 
 
-
-
 //Type alias for source code location info
 SourceCodeLocation::runtime.Source_Code_Location
 #assert(SourceCodeLocation == runtime.Source_Code_Location)
-
-QueryToken :: enum{
-    INVALID = 0,
-    //Command tokens
-    NEW,
-    ERASE,
-    FETCH,
-    RENAME,
-    SET,
-    PURGE,
-    //parameter tokens
-    TO,
-    OF_TYPE,
-    WITH,
-    //Create and add more???
-}
-
-QueryTokenString :: #partial[QueryToken]string{
-    .NEW = "NEW",
-    .ERASE = "ERASE",
-    .RENAME = "RENAME",
-    .FETCH = "FETCH",
-    .SET = "SET",
-    .PURGE = "PURGE",
-    .TO = "TO",
-    .OF_TYPE = "OF_TYPE",
-    .WITH = "WITH",
-}
-
-TokenStrings :: #partial[QueryToken]string{
-    //command token strings
-    .NEW = "NEW",
-    .ERASE = "ERASE",
-    .FETCH = "FETCH",
-    .RENAME = "RENAME",
-    .SET = "SET",
-    .PURGE = "PURGE",
-    //parameter token strings
-    .TO = "TO",
-    .OF_TYPE = "OF_TYPE",
-    .WITH = "WITH",
-
-}
-
-Query :: struct {
-    CommandToken : QueryToken,
-    LocationToken: [dynamic]string,
-    ParameterToken: map[string]string,
-    isChained: bool,
-    rawInput: string
-}
 
 // User-specific path configuration for isolated user environments
 UserPathConfig :: struct {
@@ -524,7 +399,6 @@ AppConfig :: struct {
 }
 
 
-
 // Enhanced query parameter structure
 QueryParams :: struct {
     recordType: string,  // ?type=STRING
@@ -554,8 +428,6 @@ SortOrder :: enum {
     DESC,
 }
 
-//TODO: Add date filtering???
-
 SearchCriteria :: struct {
     namePattern: string,
     valuePattern: string,
@@ -568,4 +440,236 @@ SearchCriteria :: struct {
     },
     sortField: SortField,
     sortOrder: SortOrder,
+}
+
+ErrorEvent :: struct {
+    description:    string,
+    type:           ErrorEventType,
+    severity:       ErrorSeverity,
+    timestamp:      time.Time,
+    // error_code:     OstrichError,
+}
+
+ErrorSeverity :: enum {
+    DEBUG = 0,
+    INFO,
+    WARNING,
+    ERROR,
+    CRITICAL,
+}
+
+ErrorEventType :: enum {
+
+    // Subsystem Categories
+    DATABASE_ENGINE,    // Core database operations
+    AUTHENTICATION,     // JWT, user validation, permissions
+    SECURITY,          // Encryption, key management, access control
+    NETWORK,           // TCP connections, HTTP requests, timeouts
+    FILE_SYSTEM,       // File I/O, permissions, disk space
+    MEMORY,            // Allocation failures, leaks, OOM
+    CONFIGURATION,     // Config loading, validation, environment
+    PERFORMANCE,       // Slow queries, resource exhaustion
+
+    // Operation Types
+    CREATE_OPERATION,  // Project/collection/cluster/record creation
+    READ_OPERATION,    // Data retrieval operations
+    UPDATE_OPERATION,  // Data modification operations
+    DELETE_OPERATION,  // Data deletion operations
+    SEARCH_OPERATION,  // Query and search operations
+
+    // Infrastructure
+    BACKUP_FAILURE,    // Backup/restore operations
+    RATE_LIMITING,     // Rate limit violations
+    VALIDATION_ERROR,  // Data validation failures
+    PARSING_ERROR,     // JSON/data parsing issues
+    TRANSACTION_ERROR, // Future transaction failures
+
+    API_ERROR,         // REST API specific errors
+}
+
+
+
+//Manual Query Editor Shit
+Query :: struct {
+	commandToken:            Token, //command token
+	locationToken:            [dynamic]string, //location token
+	paramToken:            map[string]string, //parameter token
+	targetToken:            string, //target token only needed for very specific commands like WHERE,HELP, and NEW USER
+	isChained:         bool,
+	rawInput:          string
+}
+
+QueryParserState :: enum {
+    EXPECTING_COMMAND_TOKEN = 0,
+    EXPECTING_PARAM_TOKEN,
+    EXPECTING_VALUE
+}
+
+Command :: struct {
+	c_token:            Token, //command token
+	l_token:            [dynamic]string, //location token
+	p_token:            map[string]string, //parameter token
+	t_token:            string, //target token only needed for very specific commands like WHERE,HELP, and NEW USER
+	isChained:         bool,
+	rawInput:          string
+}
+
+TokenType:: enum {
+    COMMAND= 0,
+    PARAM,
+    TARGET,
+}
+
+Token :: enum {
+	//Command tokens
+	INVALID,
+	DESTROY,
+	VERSION,
+	HELP,
+	CLEAR,
+	TREE,
+	HISTORY,
+	WHERE,
+	NEW,
+	BACKUP,
+	ERASE,
+	RENAME,
+	FETCH,
+	COUNT,
+	SET,
+	PURGE,
+	SIZE_OF,
+	TYPE_OF,
+	CHANGE_TYPE,
+	//Parameter tokens
+	WITH,
+	OF_TYPE,
+	TO,
+	//Shorthand and traditional basic type tokens
+	STR,
+	STRING,
+	INT,
+	INTEGER,
+	FLT,
+	FLOAT,
+	BOOL,
+	BOOLEAN,
+	CHAR,
+	//shorthand and traditional complex types
+	STR_ARRAY,
+	STRING_ARRAY,
+	INT_ARRAY,
+	INTEGER_ARRAY,
+	FLT_ARRAY,
+	FLOAT_ARRAY,
+	BOOL_ARRAY,
+	BOOLEAN_ARRAY,
+	CHAR_ARRAY,
+	//More advance complex types...They follow ISO 8601 format
+	DATE,
+	TIME,
+	DATETIME,
+	DATE_ARRAY,
+	TIME_ARRAY,
+	DATETIME_ARRAY,
+	//Misc types
+	UUID,
+	UUID_ARRAY,
+	NULL,
+	// Lesser used target tokens
+	COLLECTION,
+	COLLECTIONS,
+	CLUSTER,
+	CLUSTERS,
+	RECORD,
+	RECORDS,
+	// General purpose misc tokens
+	CLPS,
+	CLP,
+	YES,
+	NO,
+	CONFIRM,
+	CANCEL,
+	//Not using any tokens below this point yet... - Marshall
+	// TEST,
+	// ALL,
+	// AND,
+	// ALL_OFF,
+}
+
+
+TokenStr := #partial [Token]string {
+	.DESTROY        = "DESTROY",
+	.VERSION        = "VERSION",
+	.HELP           = "HELP",
+	.CLEAR          = "CLEAR",
+	.TREE           = "TREE",
+	.HISTORY        = "HISTORY",
+	.WHERE          = "WHERE",
+	//Command Tokens
+	.NEW            = "NEW",
+	.BACKUP         = "BACKUP",
+	.ERASE          = "ERASE",
+	.RENAME         = "RENAME",
+	.FETCH          = "FETCH",
+	.COUNT          = "COUNT",
+	.SET            = "SET",
+	.PURGE          = "PURGE",
+	.SIZE_OF        = "SIZE_OF",
+	.TYPE_OF        = "TYPE_OF",
+	.CHANGE_TYPE    = "CHANGE_TYPE",
+	//Parameter tokens
+	.WITH            = "WITH",
+	.OF_TYPE        = "OF_TYPE",
+	.TO             = "TO",
+	//Shorthand and traditional basic type tokens
+	.CHAR           = "CHAR",
+	.STR            = "STR",
+	.STRING         = "STRING",
+	.INT            = "INT",
+	.INTEGER        = "INTEGER",
+	.FLT            = "FLT",
+	.FLOAT          = "FLOAT",
+	.BOOL           = "BOOL",
+	.BOOLEAN        = "BOOLEAN",
+	//shorthand and traditional complex types
+	.CHAR_ARRAY     = "[]CHAR",
+	.STR_ARRAY      = "[]STR",
+	.STRING_ARRAY   = "[]STRING",
+	.INT_ARRAY      = "[]INT",
+	.INTEGER_ARRAY  = "[]INTEGER",
+	.FLT_ARRAY      = "[]FLT",
+	.FLOAT_ARRAY    = "[]FLOAT",
+	.BOOL_ARRAY     = "[]BOOL",
+	.BOOLEAN_ARRAY  = "[]BOOLEAN",
+	//More advance complex types...They follow ISO 8601 format
+	.DATE           = "DATE",
+	.TIME           = "TIME",
+	.DATETIME       = "DATETIME",
+	.DATE_ARRAY     = "[]DATE",
+	.TIME_ARRAY     = "[]TIME",
+	.DATETIME_ARRAY = "[]DATETIME",
+	//Misc types
+	.UUID           = "UUID",
+	.UUID_ARRAY     = "[]UUID",
+	.NULL           = "NULL",
+	// Lesser used target tokens
+	.COLLECTION     = "COLLLECTION",
+	.COLLECTIONS    = "COLLECTIONS",
+	.CLUSTER        = "CLUSTER",
+	.CLUSTERS       = "CLUSTERS",
+	.RECORD         = "RECORD",
+	.RECORDS        = "RECORDS",
+	// General purpose misc tokens
+	.CLP            = "CLP",
+	.CLPS           = "CLPS",
+	.YES            = "YES",
+	.NO             = "NO",
+	.CONFIRM        = "CONFIRM",
+	.CANCEL         = "CANCEL",
+	//Not using any tokens below this point yet... - Marshall
+	// .TEST = "TEST",
+	// .ALL = "ALL",
+	// .AND = "AND",
+	// .ALL_OFF = "ALL_OFF",
 }

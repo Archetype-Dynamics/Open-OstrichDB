@@ -5,23 +5,19 @@ import "core:fmt"
 import "core:strings"
 import "../../config"
 import lib "../../../library"
+import "../users"
 /********************************************************
 Author: Marshall A Burns
 GitHub: @SchoolyB
 
 Copyright (c) 2025-Present Marshall A Burns and Archetype Dynamics, Inc.
+All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+This software is proprietary and confidential. Unauthorized copying,
+distribution, modification, or use of this software, in whole or in part,
+is strictly prohibited without the express written permission of
+Archetype Dynamics, Inc.
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 
 File Description:
             This file contains all the logic for interacting with
@@ -47,28 +43,63 @@ make_new_collection :: proc(name:string, type: lib.CollectionType) -> ^lib.Colle
 create_collection_file :: proc(projectContext: ^lib.ProjectContext,collection: ^lib.Collection) -> ^lib.Error {
     using lib
 
+    isValidName, validityCheckError:= validate_collection_name(projectContext, collection)
+    if validityCheckError != nil || isValidName == false {
+        users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = "Invalid collection name provided",
+            type = .CREATE_OPERATION,
+            timestamp = lib.get_current_time()
+        })
+        return validityCheckError
+    }
+
      collectionPath := get_specific_collection_full_path(projectContext, collection)
      defer delete(collectionPath)
      // Check if a collection of the passed in name already exists
-     collectionAlreadtExists, checkError:=  check_if_collection_exists(projectContext,collection)
-     if collectionAlreadtExists || checkError != nil{
+     collectionAlreadyExists, checkError:=  check_if_collection_exists(projectContext,collection)
+     if collectionAlreadyExists || checkError != nil{
+         users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+             severity = .ERROR,
+             description = fmt.tprintf("Collection: %s already exists", collection.name),
+             type = .CREATE_OPERATION,
+             timestamp = lib.get_current_time()
+         })
          return make_new_err(.COLLECTION_ALREADY_EXISTS, get_caller_location())
      }
 
-    file, creationSuccess:= os.open(collectionPath, os.O_CREATE, 0o666)
+    file, creationSuccess:= os.open(collectionPath, os.O_CREATE, FILE_MODE_RW_ALL)
 	defer os.close(file)
 
     appendSuccess:= append_metadata_header_to_collection(projectContext, collection)
     if appendSuccess !=  nil{
+        users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("Unable to append metadata header to Collection: %s", collection.name),
+            type = .CREATE_OPERATION,
+            timestamp = lib.get_current_time()
+        })
         return make_new_err(.COLLECTION_CANNOT_APPEND_METADATA, get_caller_location())
     }
 
 	if creationSuccess != 0{
+		users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+			severity = .ERROR,
+			description = fmt.tprintf("Unable to create Collection: %s", collection.name),
+			type = .CREATE_OPERATION,
+			timestamp = lib.get_current_time()
+		})
 		return make_new_err(.COLLECTION_CANNOT_CREATE, get_caller_location())
 	}
 
-	appendMetadataSuccess:= init_metadate_in_new_collection(projectContext, collection)
+	appendMetadataSuccess:= init_metadata_in_new_collection(projectContext, collection)
 	if appendMetadataSuccess != nil {
+		users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+			severity = .ERROR,
+			description = fmt.tprintf("Unable to initialize metadata in Collection: %s", collection.name),
+			type = .CREATE_OPERATION,
+			timestamp = lib.get_current_time()
+		})
 	    return make_new_err(.COLLECTION_CANNOT_APPEND_METADATA, get_caller_location())
 	}
 
@@ -81,6 +112,12 @@ erase_collection ::proc(projectContext: ^lib.ProjectContext,collection: ^lib.Col
 
     collectionExists, checkError:= check_if_collection_exists(projectContext,collection)
     if !collectionExists || checkError != nil{
+        users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("Collection: %s not found", collection.name),
+            type = .DELETE_OPERATION,
+            timestamp = lib.get_current_time()
+        })
         return make_new_err(.COLLECTION_NOT_FOUND, get_caller_location())
     }
 
@@ -89,6 +126,12 @@ erase_collection ::proc(projectContext: ^lib.ProjectContext,collection: ^lib.Col
 
 	deleteSuccess := os.remove(collectionPath)
 	if deleteSuccess != 0 {
+		users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+			severity = .ERROR,
+			description = fmt.tprintf("Unable to delete Collection: %s", collection.name),
+			type = .DELETE_OPERATION,
+			timestamp = lib.get_current_time()
+		})
         return make_new_err(.COLLECTION_CANNOT_DELETE, get_caller_location())
 	}
 
@@ -97,28 +140,46 @@ erase_collection ::proc(projectContext: ^lib.ProjectContext,collection: ^lib.Col
 
 //Renames the passed in collection.name to the new name
 @(require_results)
-rename_collection :: proc(projectContext: ^lib.ProjectContext,collection: ^lib.Collection, newName:string) -> ^lib.Error {
+rename_collection :: proc(projectContext: ^lib.ProjectContext,collection: ^lib.Collection, newCollection: ^lib.Collection) -> ^lib.Error {
     using lib
 
-    //Check if a collection with the name that the user wants to rename does in fact check_if_collection_exists
+    //Check if a collection with the name that the user wants to rename does in fact exists
     collectionExists, checkError:= check_if_collection_exists(projectContext,collection)
    if !collectionExists || checkError != nil{
+        users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("Collection: %s not found for rename operation", collection.name),
+            type = .UPDATE_OPERATION,
+            timestamp = lib.get_current_time()
+        })
         return make_new_err(.COLLECTION_NOT_FOUND, get_caller_location())
     }
 
-    //Now check if there is already a collection using the name "newName"
-    newCollection:= make_new_collection(newName, .STANDARD)
-    defer free(newCollection)
-    collectionAlreadyExists, newCheckError:= check_if_collection_exists(projectContext,newCollection)
-    if collectionAlreadyExists || newCheckError != nil{
-        return make_new_err(.COLLECTION_ALREADY_EXISTS, get_caller_location())
+    isValidName, validityCheckError:= validate_collection_name(projectContext, newCollection)
+    if validityCheckError != nil || isValidName == false {
+        users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("Invalid new collection name: %s", newCollection.name),
+            type = .UPDATE_OPERATION,
+            timestamp = lib.get_current_time()
+        })
+        return validityCheckError
     }
 
-	collectionPath := lib.get_specific_collection_full_path(projectContext, collection)
+	collectionPath := get_specific_collection_full_path(projectContext, collection)
 	defer delete(collectionPath)
 
-    renameSuccess := lib.rename_file(collectionPath, fmt.tprintf("%s.ostrichdb", newName))
+	newCollectionPath:= get_specific_collection_full_path(projectContext, newCollection)
+	defer delete(newCollectionPath)
+
+    renameSuccess := lib.rename_file(collectionPath, newCollectionPath)
     if !renameSuccess  {
+       users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+           severity = .ERROR,
+           description = fmt.tprintf("Unable to rename Collection: %s to %s", collection.name, newCollection.name),
+           type = .UPDATE_OPERATION,
+           timestamp = lib.get_current_time()
+       })
        return make_new_err(.COLLECTION_CANNOT_UPDATE, get_caller_location())
     }
 
@@ -167,6 +228,12 @@ get_all_collection_names :: proc(projectContext: ^lib.ProjectContext) -> ([dynam
     defer os.file_info_slice_delete(collections)
 
     if readDirError!=nil{
+        users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = "Unable to read collections directory",
+            type = .READ_OPERATION,
+            timestamp = lib.get_current_time()
+        })
         return collectionArray, make_new_err(.STANDARD_CANNOT_READ_DIRECTORY, get_caller_location())
     }
 
@@ -188,11 +255,23 @@ check_if_collection_exists :: proc(projectContext: ^lib.ProjectContext, collecti
 
     dir, openError:= os.open(collectionPath)
     if  openError != nil{
+        users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = "Unable to open collections directory",
+            type = .READ_OPERATION,
+            timestamp = lib.get_current_time()
+        })
         return exists, make_new_err(.STANDARD_CANNOT_OPEN_DIRECTORY, get_caller_location())
     }
     files, readError := os.read_dir(dir, -1)
     defer os.file_info_slice_delete(files)
     if  readError != nil{
+        users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = "Unable to read collections directory",
+            type = .READ_OPERATION,
+            timestamp = lib.get_current_time()
+        })
         return exists, make_new_err(.STANDARD_CANNOT_READ_DIRECTORY, get_caller_location())
     }
 
@@ -233,8 +312,7 @@ validate_collection_name :: proc(projectContext: ^lib.ProjectContext, collection
 	using lib
 
 	//CHECK#1: check collection name length
-	nameAsBytes := transmute([]byte)collection.name
-	if len(nameAsBytes) > MAX_COLLECTION_NAME_LENGTH {
+	if len(transmute([]byte)collection.name) > MAX_DATA_STRUCURE_NAME_LEN {
 		return false, make_new_err(.COLLECTION_INVALID_NAME, get_caller_location())
 	}
 
@@ -245,13 +323,8 @@ validate_collection_name :: proc(projectContext: ^lib.ProjectContext, collection
 	}
 
 	//CHECK#3: check if the name has special chars
-	invalidChars := "[]{}()<>;:.,?/\\|`~!@#$%^&*+="
-	defer delete(invalidChars)
-
-	for c := 0; c < len(collection.name); c += 1 {
-		if strings.contains_any(collection.name, invalidChars) {
-			return false, make_new_err(.COLLECTION_INVALID_NAME, get_caller_location())
-		}
+	if contains_disallowed_chars(collection.name){
+		return false, make_new_err(.COLLECTION_INVALID_NAME, get_caller_location())
 	}
 
 	return true, no_error()

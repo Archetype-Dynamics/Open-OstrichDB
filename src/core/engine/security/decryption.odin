@@ -15,18 +15,12 @@ Author: Marshall A Burns
 GitHub: @SchoolyB
 
 Copyright (c) 2025-Present Marshall A Burns and Archetype Dynamics, Inc.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+All Rights Reserved.
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+This software is proprietary and confidential. Unauthorized copying,
+distribution, modification, or use of this software, in whole or in part,
+is strictly prohibited without the express written permission of
+Archetype Dynamics, Inc.
 
 
 File Description:
@@ -58,42 +52,69 @@ Decryption process :
 decrypt_collection :: proc(projectContext:^lib.ProjectContext,collection: ^lib.Collection,  key: []u8) -> (decData: []u8, err: ^lib.Error) {
     using lib
     using data
+    using fmt
 
- //    collectionPath := get_specific_collection_full_path(projectContext, collection)
- //    defer delete(collectionPath)
+	// First read the raw file to see its actual size
+	collectionPath := get_specific_collection_full_path(projectContext, collection)
+	defer delete(collectionPath)
+	rawFileData, rawReadSuccess := read_file(collectionPath, get_caller_location())
+	if rawReadSuccess {
+		defer delete(rawFileData)
+	} else {
+		return []u8{}, make_new_err(.STANDARD_CANNOT_READ_FILE, get_caller_location())
+	}
 
-	// ciphertext, readSuccess := read_file(collectionPath, get_caller_location())
-	// defer delete(ciphertext)
-	// if !readSuccess do return nil, make_new_err(.COLLECTION_CANNOT_READ, get_caller_location())
+	// Parse collection to separate metadata and body
+	parsedCollection, parseError := parse_entire_collection(projectContext, collection)
+	if parseError != nil {
+		return nil, parseError
+	}
 
-	// dataSize := len(ciphertext) - aes.GCM_IV_SIZE - aes.GCM_TAG_SIZE // the size of the ciphertext minus 16 bytes for the iv then minus another 16 bytes for the tag
-	// if dataSize <= 0 do return nil, make_new_err(.SECURITY_CANNOT_DECRYPT_COLLECTION, get_caller_location()) //if n is less than or equal to 0 then return nil
+	// Extract encrypted body content
+	encryptedBody := transmute([]u8)parsedCollection.body.rawBody
+	if len(encryptedBody) == 0 { //if empty nothing to decryt
+		return nil, no_error()
+	}
 
-	// aad: []u8 = nil
-	// decryptedData := make([]u8, dataSize) //allocate the size of the decrypted data that comes from the allocation context
-	// iv := ciphertext[:aes.GCM_IV_SIZE] //iv is the first 16 bytes
-	// encryptedData := ciphertext[aes.GCM_IV_SIZE:][:dataSize] //the actual encryptedData is the bytes after the iv
-	// tag := ciphertext[aes.GCM_IV_SIZE + dataSize:] // tag is the 16 bytes at the end of the ciphertext
+	// Decrypt body content
+	dataSize := len(encryptedBody) - aes.GCM_IV_SIZE - aes.GCM_TAG_SIZE
+	if dataSize <= 0 {
+		return nil, make_new_err(.SECURITY_CANNOT_DECRYPT_COLLECTION, get_caller_location())
+	}
 
-	// gcmContext: aes.Context_GCM
-	// aes.init_gcm(&gcmContext, key) //initialize the gcm context with the key
+	aad: []u8 = nil
+	decryptedData := make([]u8, dataSize)
+	iv := encryptedBody[:aes.GCM_IV_SIZE] // First 16 bytes
+	ciphertext := encryptedBody[aes.GCM_IV_SIZE:][:dataSize] // Encrypted data after IV
+	tag := encryptedBody[aes.GCM_IV_SIZE + dataSize:] // Tag at the end
 
-	// if !aes.open_gcm(&gcmContext, decryptedData, iv, aad, encryptedData, tag) {
-	// 	delete(decryptedData)
-	// 	delete (encryptedData)
-	// 	return nil, make_new_err(.SECURITY_CANNOT_DECRYPT_COLLECTION, get_caller_location())
-	// }
+	gcmContext: aes.Context_GCM
+	aes.init_gcm(&gcmContext, key)
 
-	// aes.reset_gcm(&gcmContext)
+	if !aes.open_gcm(&gcmContext, decryptedData, iv, aad, ciphertext, tag) {
+		delete(decryptedData)
+		return nil, make_new_err(.SECURITY_CANNOT_DECRYPT_COLLECTION, get_caller_location())
+	}
 
-	// os.remove(collectionPath)
-	// writeSuccess := write_to_file(collectionPath, decryptedData, get_caller_location())
- //    if writeSuccess {
- //        return decryptedData, no_error()
- //    }
+	aes.reset_gcm(&gcmContext)
 
-	// return nil, make_new_err(.SECURITY_CANNOT_DECRYPT_COLLECTION, get_caller_location())
-	return nil, nil
+	// Update metadata encryption state
+	metadata := parsedCollection.metadataHeader
+	update_metadata_field(&metadata, .ENCRYPTION_STATE, "0")
+
+	// Reconstruct collection with plaintext metadata + decrypted body
+	reconstructedCollection := reconstruct_collection(metadata, string(decryptedData))
+
+	// Write back to file
+	cPath := get_specific_collection_full_path(projectContext, collection)
+	defer delete(cPath)
+	writeSuccess := write_to_file(cPath, transmute([]u8)reconstructedCollection, get_caller_location())
+	if !writeSuccess {
+		delete(decryptedData)
+		return nil, make_new_err(.SECURITY_CANNOT_DECRYPT_COLLECTION, get_caller_location())
+	}
+
+	return decryptedData, no_error()
 }
 
 //Uses the users Kinde Auth info to decrypt collections
@@ -101,12 +122,15 @@ decrypt_collection_with_user_context :: proc(projectContext: ^lib.ProjectContext
     using lib
     using data
 
-    // masterKey, keyErr := get_user_master_key(projectContext.userID)
-    // if keyErr != nil {
-    //     return nil, keyErr
-    // }
-    // defer clear_key_from_memory(masterKey)
+    if projectContext == nil || len(projectContext.userID) == 0 {
+        return nil, make_new_err(.SECURITY_INVALID_CONTEXT, get_caller_location())
+    }
 
-    // return decrypt_collection(projectContext, collection, masterKey)
-    return nil, nil
+    masterKey, keyErr := get_user_master_key(projectContext.userID)
+    if keyErr != nil {
+        return nil, keyErr
+    }
+    defer clear_key_from_memory(masterKey)
+
+    return decrypt_collection(projectContext, collection, masterKey)
 }

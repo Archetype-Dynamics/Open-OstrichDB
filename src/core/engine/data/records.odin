@@ -7,23 +7,18 @@ import "core:strings"
 import "core:strconv"
 import "../../config"
 import lib "../../../library"
+import "../users"
 /********************************************************
 Author: Marshall A Burns
 GitHub: @SchoolyB
 
 Copyright (c) 2025-Present Marshall A Burns and Archetype Dynamics, Inc.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+All Rights Reserved.
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+This software is proprietary and confidential. Unauthorized copying,
+distribution, modification, or use of this software, in whole or in part,
+is strictly prohibited without the express written permission of
+Archetype Dynamics, Inc.
 
 
 File Description:
@@ -44,6 +39,7 @@ make_new_record :: proc(collection: ^lib.Collection, cluster: ^lib.Cluster, reco
     record.id = 0
     record.name= recordName
     record.type = .INVALID
+    record.typeAsString = ""
     record.value = ""
 
     return record
@@ -62,6 +58,16 @@ create_record_within_cluster :: proc(projectContext: ^lib.ProjectContext,collect
     using fmt
     using strings
 
+    isValidName, validityCheckError:= valid_record_name(record)
+    if validityCheckError != nil || isValidName == false {
+        users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = "Invalid record name provided",
+            type = .CREATE_OPERATION,
+            timestamp = lib.get_current_time()
+        })
+        return validityCheckError
+    }
 
     collectionPath := get_specific_collection_full_path(projectContext, collection)
     defer delete(collectionPath)
@@ -80,6 +86,12 @@ create_record_within_cluster :: proc(projectContext: ^lib.ProjectContext,collect
     //Now check to see if a record with the desired name already exists
     recordAlreadyExists, _:= check_if_record_exists_in_cluster(projectContext, collection, cluster, record)
     if recordAlreadyExists{
+        users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("Record: %s already exists in Cluster: %s", record.name, cluster.name),
+            type = .CREATE_OPERATION,
+            timestamp = lib.get_current_time()
+        })
         return make_new_err(.RECORD_ALREADY_EXISTS, get_caller_location())
     }
 
@@ -120,8 +132,7 @@ create_record_within_cluster :: proc(projectContext: ^lib.ProjectContext,collect
 
 
 	// construct the new record line
-	newRecordLine := tprintf("\t%s :%s: %s", record.name, record.type, record.value)
-
+	newRecordLine := tprintf("\t%s :%s: %s", record.name, record.typeAsString, record.value)
 	// Insert the new line and adjust the closing brace
 	oldContent := make([dynamic]string, len(lines) + 1)
 	defer delete(oldContent)
@@ -145,7 +156,7 @@ create_record_within_cluster :: proc(projectContext: ^lib.ProjectContext,collect
 
 //Reads over the passed in collection and the passed in cluster for the record. renames the record.name with the newName arg
 @(require_results)
-rename_reocord :: proc(projectContext: ^lib.ProjectContext,collection: ^lib.Collection, cluster: ^lib.Cluster, oldRecord: ^lib.Record, newName:string) -> ^lib.Error {
+rename_record :: proc(projectContext: ^lib.ProjectContext,collection: ^lib.Collection, cluster: ^lib.Cluster, oldRecord: ^lib.Record, newName:string) -> ^lib.Error {
     using lib
     using fmt
     using strings
@@ -168,6 +179,11 @@ rename_reocord :: proc(projectContext: ^lib.ProjectContext,collection: ^lib.Coll
 
 	newRecord:= make_new_record(collection, cluster, newName)
 	defer free(newRecord)
+
+    isValidName, validityCheckError:= valid_record_name(newRecord)
+    if validityCheckError != nil || isValidName == false {
+        return validityCheckError
+    }
 
 	//If there is already a record with the desired new name throw error
 	recordExistsInCluster, rCheckErr:=check_if_record_exists_in_cluster(projectContext, collection,cluster,newRecord)
@@ -378,14 +394,15 @@ update_record_value :: proc(projectContext: ^lib.ProjectContext,collection: ^lib
 			}
 		}
 
+
 		// if in the target cluster, find the record and update it
-		if inTargetCluster && contains(trimmedLine, record.name) {
+		targetRecordField := fmt.tprintf("%s :", record.name)
+		if inTargetCluster && strings.has_prefix(trimmedLine, targetRecordField) {
 			leadingWhitespace := split(line, record.name)[0]
 			parts := split(trimmedLine, ":")
 			if len(parts) >= 2 {
 				lines[i] = tprintf(
-					"%s%s:%s: %v",
-					leadingWhitespace,
+					"\t%s:%s: %v",
 					parts[0],
 					parts[1],
 					newValue,
@@ -1088,7 +1105,7 @@ set_record_value ::proc(projectContext: ^lib.ProjectContext,collection: ^lib.Col
 		if len(record.value) != 1 {
 			setValueOk = false
 		} else {
-			valueAny = append_single_qoutations__string(record.value)
+			valueAny = append_single_qoutations_string(record.value)
 			setValueOk = true
 		}
 		break
@@ -1879,4 +1896,15 @@ parse_record :: proc(recordAsString: string) -> (lib.Record, ^lib.Error) {
         typeAsString = clone(RecordDataTypesStrings[newRecordDataType]),
         value = clone(recordValue)
 	}, no_error()
+}
+
+
+@(require_results)
+valid_record_name :: proc(record: ^lib.Record) -> (bool, ^lib.Error){
+    using lib
+
+    //Name len check and invalid char check
+    if len(record.name) > MAX_DATA_STRUCURE_NAME_LEN || contains_disallowed_chars(record.name) do return false, make_new_err(.CLUSTER_NAME_INVALID, get_caller_location())
+
+    return true, no_error()
 }

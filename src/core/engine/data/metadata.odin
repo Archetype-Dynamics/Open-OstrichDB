@@ -14,18 +14,12 @@ Author: Marshall A Burns
 GitHub: @SchoolyB
 
 Copyright (c) 2025-Present Marshall A Burns and Archetype Dynamics, Inc.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+All Rights Reserved.
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+This software is proprietary and confidential. Unauthorized copying,
+distribution, modification, or use of this software, in whole or in part,
+is strictly prohibited without the express written permission of
+Archetype Dynamics, Inc.
 
 
 File Description:
@@ -46,7 +40,7 @@ serialize_metadata_header :: proc(metadata: CollectionMetadata) -> string {
     // Add metadata start marker
     append(&headerLines, METADATA_START)
 
-    // Add metadata fields
+
     append(&headerLines, tprintf("# Encryption State: %s\n", metadata.encryptionState))
     append(&headerLines, tprintf("# File Format Version: %s\n", metadata.fileFormatVersion))
     append(&headerLines, tprintf("# Date of Creation: %s\n", metadata.dateCreation))
@@ -56,7 +50,6 @@ serialize_metadata_header :: proc(metadata: CollectionMetadata) -> string {
 
     // Add metadata end marker
     append(&headerLines, METADATA_END)
-    append(&headerLines, "\n")
 
     return join(headerLines[:], "")
 }
@@ -227,7 +220,7 @@ append_metadata_header_to_collection :: proc(projectContext: ^lib.ProjectContext
 		return make_new_err(.METADATA_HEADER_ALREADY_EXISTS, get_caller_location())
 	}
 
-	file, openSuccess := os.open(collectionPath, os.O_APPEND | os.O_WRONLY, 0o666)
+	file, openSuccess := os.open(collectionPath, os.O_APPEND | os.O_WRONLY, FILE_MODE_RW_ALL)
 	defer os.close(file)
 	if openSuccess != 0{
         return make_new_err(.COLLECTION_CANNOT_OPEN, get_caller_location())
@@ -280,8 +273,10 @@ explicitly_assign_metadata_value :: proc(projectContext: ^lib.ProjectContext, co
             update_metadata_field(&metadata, field, "0") // Default to 0 if no value provided
         }
 	case .FILE_FORMAT_VERSION:
-        ffv := string(get_ost_version())
-        update_metadata_field(&metadata, field, ffv)
+        ffv, _:= get_ost_version()
+        update_metadata_field(&metadata, field, string(ffv))
+        // causes segfault??
+        // delete(ffv)
 	case .DATE_CREATION:
         update_metadata_field(&metadata, field, currentDate)
 	case .DATE_MODIFIED:
@@ -380,7 +375,7 @@ update_metadata_value :: proc(projectContext: ^lib.ProjectContext,collection:^li
     case .ENCRYPTION_STATE:
         update_metadata_field(&metadata, field, newValue)
     case:
-        return make_new_err(.METADATE_FIELD_NOT_FOUND, get_caller_location())
+        return make_new_err(.METADATA_FIELD_NOT_FOUND, get_caller_location())
     }
 
     // Reconstruct and write the collection
@@ -400,7 +395,7 @@ update_metadata_value :: proc(projectContext: ^lib.ProjectContext,collection:^li
 
 //Assigns all neccesary metadata field values after a collection has been made
 @(require_results)
-init_metadate_in_new_collection :: proc(projectContext: ^lib.ProjectContext, collection: ^lib.Collection) -> ^lib.Error {
+init_metadata_in_new_collection :: proc(projectContext: ^lib.ProjectContext, collection: ^lib.Collection) -> ^lib.Error {
     using lib
 
     // Parse once
@@ -421,10 +416,12 @@ init_metadate_in_new_collection :: proc(projectContext: ^lib.ProjectContext, col
     // Update all fields in the same metadata struct
     update_metadata_field(&metadata, .ENCRYPTION_STATE, "0")
 
-    ffv := string(get_ost_version())
-    update_metadata_field(&metadata, .FILE_FORMAT_VERSION, ffv)
+    ffv, _ := get_ost_version()
+    update_metadata_field(&metadata, .FILE_FORMAT_VERSION, string(ffv))
     update_metadata_field(&metadata, .DATE_CREATION, currentDate)
     update_metadata_field(&metadata, .DATE_MODIFIED, currentDate)
+    // CAUSES SEGFAULT?
+    // delete(ffv)
 
     actualSize, getSizeError := subtract_metadata_size_from_collection(projectContext, collection)
     if getSizeError == nil {

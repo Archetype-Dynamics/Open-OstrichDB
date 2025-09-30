@@ -1,7 +1,11 @@
 # Compiled binaries
 *.bin
 *.so
+*.dylib
 *.exe
+*.log
+*.logs
+bin/logs/
 
 # Environment files
 .env
@@ -21,8 +25,12 @@ bin/logs/
 bin/tmp/
 bin/system/
 
+
 # Allow specific Go and Odin source files
 !main/main.odin
+# Exclude Go module files if not needed
+go.sum
+go.mod
 
 # System and IDE files
 .DS_Store
@@ -30,3 +38,6 @@ bin/system/
 *.key
 *.ostrichdb
 *project.json
+*.claude
+*rate_limits
+*requests.json

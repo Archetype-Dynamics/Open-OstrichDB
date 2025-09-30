@@ -4,7 +4,7 @@ Open-source implementation of the OstrichDB database backend written in Odin.
 
 ## Overview
 
-Open-Ostrich is the open-source version of OstrichDB, a hierarchical NoSQL database system designed for efficient data organization and retrieval. This implementation provides the core database engine functionality with a RESTful API server, written entirely in the Odin programming language.
+Open-OstrichDB is the open-source version of OstrichDB, a hierarchical NoSQL database system designed for efficient data organization and retrieval. This implementation provides the core database engine functionality with a RESTful API server, written entirely in the Odin programming language.
 
 **Note:** This is the open-source reference implementation. The production OstrichDB backend is closed-source and may contain additional enterprise features.
 
@@ -123,48 +123,27 @@ Key configuration sections:
 
 The build script will compile the project and start the server on `localhost:8042` by default (configurable in `config/development.json`).
 
-### First-Time Setup
-
-Uncomment the setup functions in `main/main.odin` for initial user and project creation:
-
-```odin
-// create_test_user()
-// test_project_creation()
-```
-
 ## Data Types
 
 OstrichDB supports rich data types for records:
 
 **Basic Types:**
-- `STRING` / `STR` / `CHAR`
+- `CHAR`
+- `STRING` / `STR` /
 - `INTEGER` / `INT`
 - `FLOAT` / `FLT`
 - `BOOLEAN` / `BOOL`
-- `DATE`, `TIME`, `DATETIME`
+- `DATE`,
+- `TIME`,
+- `DATETIME`
 - `UUID`
 - `NULL`
-- `CREDENTIAL` (encrypted)
 
 **Array Types:**
 - `[]STRING`, `[]INTEGER`, `[]FLOAT`, `[]BOOLEAN`
 - `[]DATE`, `[]TIME`, `[]DATETIME`, `[]UUID`
+ Note: You can use the data type's shorthand e.g: `[]STR` or `[]INT`
 
-
-## Development
-
-### Contributing
-This is the open-source reference implementation of OstrichDB. Contributions are welcome for:
-- Bug fixes and stability improvements
-- Performance optimizations
-- Documentation enhancements
-- Additional query features
-- Security improvements
-
-### Architecture Notes
-- **Memory Management**: Manual memory management with `defer` cleanup
-- **Error Handling**: Custom error system with location tracking
-- **Security**: Automatic encryption/decryption for secure operations
 
 ## License
 

@@ -9,23 +9,18 @@ import "core:encoding/json"
 import "../data"
 import "../../config"
 import lib"../../../library"
+import "../users"
 /********************************************************
 Author: Marshall A Burns
 GitHub: @SchoolyB
 
 Copyright (c) 2025-Present Marshall A Burns and Archetype Dynamics, Inc.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+All Rights Reserved.
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+This software is proprietary and confidential. Unauthorized copying,
+distribution, modification, or use of this software, in whole or in part,
+is strictly prohibited without the express written permission of
+Archetype Dynamics, Inc.
 
 
 File Description:
@@ -69,6 +64,12 @@ make_new_project_context :: proc(userID: string, projectName: string, projectID:
     }
 
     if len(userID) == 0 {
+        users.log_error_event(users.make_new_user(""), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = "userID is required for project context creation",
+            type = .CREATE_OPERATION,
+            timestamp = lib.get_current_time()
+        })
         fmt.println("ERROR: userID is required for project context creation")
         free(projectContext)
         return nil
@@ -93,10 +94,17 @@ generate_project_id :: proc() -> string {
 
 @(require_results)
 init_project_structure :: proc(projectContext: ^lib.ProjectContext) -> bool {
+    using lib
     using fmt
     using config
 
     if len(projectContext.userID) == 0 {
+        users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = "Cannot initialize project structure without userID",
+            type = .CREATE_OPERATION,
+            timestamp = lib.get_current_time()
+        })
         fmt.println("ERROR: Cannot initialize project structure without userID")
         return false
     }
@@ -104,6 +112,12 @@ init_project_structure :: proc(projectContext: ^lib.ProjectContext) -> bool {
     // Ensure user directory structure exists first
     if !user_directory_exists(projectContext.userID) {
         if !create_user_directory_structure(projectContext.userID) {
+            users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+                severity = .ERROR,
+                description = fmt.tprintf("Failed to create user directory structure for user: %s", projectContext.userID),
+                type = .CREATE_OPERATION,
+                timestamp = lib.get_current_time()
+            })
             fmt.printf("ERROR: Failed to create user directory structure for user: %s\n", projectContext.userID)
             return false
         }
@@ -121,7 +135,13 @@ init_project_structure :: proc(projectContext: ^lib.ProjectContext) -> bool {
     }
 
     for dir in directories {
-        if os.make_directory(dir, 0o755) != 0 {
+        if os.make_directory(dir, FILE_MODE_EXECUTABLE) != 0 {
+            users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+                severity = .ERROR,
+                description = fmt.tprintf("Failed to create directory: %s", dir),
+                type = .CREATE_OPERATION,
+                timestamp = lib.get_current_time()
+            })
             success = false
         }
     }
@@ -135,7 +155,6 @@ init_project_structure :: proc(projectContext: ^lib.ProjectContext) -> bool {
             createdAt = time.now(),
             version = "1.0",
         }
-        fmt.println(metadata)
         success = save_project_metadata(projectContext, &metadata)
     }
 
@@ -154,6 +173,12 @@ save_project_metadata :: proc(projectContext: ^lib.ProjectContext, metadata: ^li
 
     jsonData, marshalError := json.marshal(metadata^)
     if marshalError != nil {
+        users.log_error_event(users.make_new_user(metadata.userID), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = "Failed to marshal project metadata to JSON",
+            type = .CREATE_OPERATION,
+            timestamp = lib.get_current_time()
+        })
         return false
     }
     defer delete(jsonData)
@@ -169,6 +194,12 @@ load_project_metadata :: proc(projectContext: ^lib.ProjectContext) -> (lib.Proje
 
     data, readMetadataSuccess := os.read_entire_file(metadataPath)
     if !readMetadataSuccess {
+        users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("Failed to read project metadata file: %s", metadataPath),
+            type = .READ_OPERATION,
+            timestamp = lib.get_current_time()
+        })
         return {}, false
     }
     defer delete(data)
@@ -176,6 +207,12 @@ load_project_metadata :: proc(projectContext: ^lib.ProjectContext) -> (lib.Proje
     metadata: lib.ProjectMetadata
     unmarshalError := json.unmarshal(data, &metadata)
     if unmarshalError != nil {
+        users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = "Failed to unmarshal project metadata from JSON",
+            type = .READ_OPERATION,
+            timestamp = lib.get_current_time()
+        })
         return {}, false
     }
 
@@ -200,6 +237,12 @@ list_projects :: proc(projectLibrary: ^lib.ProjectLibraryContext, userID: string
     projects := make([dynamic]string)
 
     if len(userID) == 0 {
+        users.log_error_event(users.make_new_user(""), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = "userID is required for listing projects",
+            type = .READ_OPERATION,
+            timestamp = lib.get_current_time()
+        })
         fmt.println("ERROR: userID is required for listing projects")
         return projects[:], false
     }
@@ -235,6 +278,8 @@ list_projects :: proc(projectLibrary: ^lib.ProjectLibraryContext, userID: string
 //returns a list of all collections within a projects context
 @(require_results)
 list_collections_in_project :: proc(projectContext: ^lib.ProjectContext) -> ([]string, bool) {
+    using lib
+
     collectionPath := fmt.tprintf("%scollections/", projectContext.basePath)
 
     collections := make([dynamic]string)
@@ -252,8 +297,8 @@ list_collections_in_project :: proc(projectContext: ^lib.ProjectContext) -> ([]s
     }
 
     for entry in entries {
-        if strings.has_suffix(entry.name, ".ostrichdb") {
-            collection_name := strings.trim_suffix(entry.name, ".ostrichdb")
+        if strings.has_suffix(entry.name, OST_EXT) {
+            collection_name := strings.trim_suffix(entry.name, OST_EXT)
             append(&collections, collection_name)
         }
     }
@@ -263,8 +308,6 @@ list_collections_in_project :: proc(projectContext: ^lib.ProjectContext) -> ([]s
 
 @(require_results)
 erase_project :: proc(projectContext: ^lib.ProjectContext) -> bool {
-    //TODO: Will need to add in some sort of confirmation later
-
     projectPath := projectContext.basePath
 
     // Recursively delete directory contents
@@ -273,8 +316,8 @@ erase_project :: proc(projectContext: ^lib.ProjectContext) -> bool {
     }
 
     // Now remove the project directory itself
-    removeSuccess := os.remove(projectPath)
-    if removeSuccess != 0 {
+    removeSuccess := lib.remove_dir(projectPath)
+    if !removeSuccess {
         fmt.println("Could not remove project directory:", projectPath)
         return false
     }
@@ -305,11 +348,17 @@ delete_directory_recursive :: proc(dirPath: string) -> bool {
             if !delete_directory_recursive(item.fullpath) {
                 return false
             }
+            removeSuccess := lib.remove_dir(item.fullpath)
+            if !removeSuccess {
+                fmt.println("Could not remove dir:", item.fullpath)
+                return false
+            }
+            continue
         }
 
         // Delete the item (file or now-empty directory)
-        removeSuccess := os.remove(item.fullpath)
-        if removeSuccess != 0 {
+        removeSuccess := lib.remove_file(item.fullpath)
+        if !removeSuccess {
             fmt.println("Could not remove item:", item.fullpath)
             return false
         }
@@ -344,8 +393,8 @@ list_collections_in_project_with_info :: proc(projectContext: ^lib.ProjectContex
     }
 
     for entry in entries {
-        if strings.has_suffix(entry.name, ".ostrichdb") {
-            collection_name := strings.trim_suffix(entry.name, ".ostrichdb")
+        if strings.has_suffix(entry.name, OST_EXT) {
+            collection_name := strings.trim_suffix(entry.name, OST_EXT)
 
             collection := make_new_collection(collection_name, .STANDARD)
             defer free(collection)
@@ -397,7 +446,15 @@ rename_project ::proc(projectContext: ^lib.ProjectContext, newPath:string) -> ^l
     using config
 
 
-    if !lib.rename_file(projectContext.basePath, newPath) do return make_new_err(.PROJECT_CANNOT_RENAME, get_caller_location())
+    if !lib.rename_file(projectContext.basePath, newPath) {
+        users.log_error_event(users.make_new_user(projectContext.userID), &lib.ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("Failed to rename project from %s to %s", projectContext.basePath, newPath),
+            type = .UPDATE_OPERATION,
+            timestamp = lib.get_current_time()
+        })
+        return make_new_err(.PROJECT_CANNOT_RENAME, get_caller_location())
+    }
 
     return no_error()
 }

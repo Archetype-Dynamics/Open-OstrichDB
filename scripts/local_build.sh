@@ -1,6 +1,6 @@
 #!/bin/bash
 # Copyright (c) 2025-Present Marshall A Burns and Archetype Dynamics, Inc.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: BSL-1.1
 
 # Get the directory of this script
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -30,6 +30,7 @@ if [ $? -eq 0 ]; then
 
     # Create bin directory if it doesn't exist
     mkdir -p ./bin
+
 
     # Try to move the executable
     if mv main.bin ./bin/ 2>/dev/null; then

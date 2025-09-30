@@ -9,18 +9,12 @@ Author: Marshall A Burns
 GitHub: @SchoolyB
 
 Copyright (c) 2025-Present Marshall A Burns and Archetype Dynamics, Inc.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+All Rights Reserved.
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+This software is proprietary and confidential. Unauthorized copying,
+distribution, modification, or use of this software, in whole or in part,
+is strictly prohibited without the express written permission of
+Archetype Dynamics, Inc.
 
 
 File Description:
@@ -30,7 +24,13 @@ File Description:
 
 UserError::enum {
     NONE = 0,
+    CANNOT_DELETE_USER
     //TODO: ADD MORE???
+}
+
+UserErrorMessage:= [UserError]string{
+    .NONE = "No Error",
+    .CANNOT_DELETE_USER = "Could Not Delete Users Account"
 }
 
 ProjectLibraryError::enum{
@@ -53,7 +53,7 @@ ProjectError::enum{
 ProjectErrorMessage:=[ProjectError]string{
     .NONE  = "No Project Error",
     .PROJECT_NOT_FOUND = "Project Not Found",
-    .PROJECT_ALREADY_EXISTS = "Project Already Existst",
+    .PROJECT_ALREADY_EXISTS = "Project Already Exists",
     .PROJECT_CANNOT_CREATE = "Could Not Create Project",
     .PROJECT_CANNOT_DELETE = "Could Not Delete Project",
     .PROJECT_CANNOT_RENAME = "Could Not Rename Project",
@@ -67,7 +67,7 @@ MetadataError ::enum {
     METADATA_CANNOT_INIT,
     METADATA_INVALID_STRUCTURE,
     METADATA_HEADER_NOT_FOUND,
-    METADATE_FIELD_NOT_FOUND,
+    METADATA_FIELD_NOT_FOUND,
     METADATA_HEADER_ALREADY_EXISTS,
     METADATA_HEADER_CANNOT_APPEND,
     METADATA_CANNOT_UPDATE_FIELD,
@@ -103,10 +103,10 @@ SecurityErrorMessage:= [SecurityError]string{
 
 MetadataErrorMessage:= [MetadataError]string{
     . NONE  = "No Error",
-    .METADATA_CANNOT_INIT = "",
+    .METADATA_CANNOT_INIT = "Could Not Initialize Metadata Header",
     .METADATA_INVALID_STRUCTURE = "Invalid Metadata Header Structure Detected",
     .METADATA_HEADER_NOT_FOUND = "Could Not Find Metadata Header In Collection",
-    .METADATE_FIELD_NOT_FOUND = "Could Not Find Metadata Field",
+    .METADATA_FIELD_NOT_FOUND = "Could Not Find Metadata Field",
     .METADATA_HEADER_ALREADY_EXISTS = "A Metadata Header Already Exists In Collection",
     .METADATA_HEADER_CANNOT_APPEND = "Could Not Append Metadata Header To Collection",
     .METADATA_CANNOT_UPDATE_FIELD = "Could Not Update A Metadata Header Field",
@@ -147,7 +147,7 @@ CollectionErrorMessage:=[CollectionError]string{
     .COLLECTION_CANNOT_APPEND_METADATA = "Could Not Append Metadata Header To Collection",
     .COLLECTION_CANNOT_UPDATE_METADATA = "Could Not Update Collection Metadata Header",
     .COLLECTION_CANNOT_DELETE = "Could Not Delete Collection",
-    .COLLECTION_CANNOT_WRITE = "Could Not Right To Collection",
+    .COLLECTION_CANNOT_WRITE = "Could Not Write To Collection",
     .COLLECTION_CANNOT_UPDATE = "Could Not Update Collection",
     .COLLECTION_CANNOT_PURGE = "Could Not Purge Collection",
     .COLLECTION_CANNOT_COUNT_CLUSTERS = "Could Not Count Clusters In Collection",
@@ -208,7 +208,7 @@ RecordError::enum{
 }
 RecordErrorMessage:=[RecordError]string{
     .NONE = "No Record Error",
-    .RECORD_CANNOT_PARSE = "",
+    .RECORD_CANNOT_PARSE = "Could Not Parse Record Data",
     .RECORD_INVALID_VALUE = "Record Has Invalid Value",
     .RECORD_NOT_FOUND = "Record Not Found",
     .RECORD_ALREADY_EXISTS = "Record Already Exists",
@@ -216,15 +216,15 @@ RecordErrorMessage:=[RecordError]string{
     .RECORD_CANNOT_CREATE = "Could Not Create Record",
     .RECORD_CANNOT_DELETE = "Could Not Delete Record",
     .RECORD_CANNOT_UPDATE = "Could Not Update Record",
-    .RECORD_CANNOT_PURGE = "",
-    .RECORD_CANNOT_GET = "",
-    . RECORD_CANNOT_GET_BY_ID = "",
+    .RECORD_CANNOT_PURGE = "Could Not Purge Record",
+    .RECORD_CANNOT_GET = "Could Not Get Record",
+    .RECORD_CANNOT_GET_BY_ID = "Could Not Get Record By ID",
     .RECORD_CANNOT_GET_NAME = "Could Not Get Records Name",
     .RECORD_CANNOT_GET_TYPE = "Could Not Get Records Type",
     .RECORD_CANNOT_GET_VALUE = "Could Not Get Records Value",
-    .RECORD_CANNOT_GET_VALUE_SIZE = "",
-    .RECORD_CANNOT_FILTER = "",
-    . RECORD_CONVERT_TYPE = "",
+    .RECORD_CANNOT_GET_VALUE_SIZE = "Could Not Get Record Value Size",
+    .RECORD_CANNOT_FILTER = "Could Not Filter Records",
+    .RECORD_CONVERT_TYPE = "Could Not Convert Record Type",
 }
 
 ComplexDataError::enum{
@@ -246,7 +246,7 @@ ComplexDataErrorMessage:=[ComplexDataError]string{
     .NONE = "No Error",
     .COMPLEX_CANNOT_PARSE_DATA = "Could Not Parse Complex Data",
     .COMPLEX_CANNOT_PARSE_ARRAY = "Could Not Parse Array",
-    .COMPLEX_CANNOT_FORMAT_ARRAY = "",
+    .COMPLEX_CANNOT_FORMAT_ARRAY = "Could Not Format Array Data",
     .COMPLEX_CANNOT_VERIFY_ARRAY_VALUES = "Could Not Verify Array Values",
     .COMPLEX_INVALID_DATE_LENGTH = "Invalid Date Length Detected",
     .COMPLEX_INVALID_DATE_FORMAT = "Invalid Date Format Detected",
@@ -282,25 +282,25 @@ DataConversionError::enum{
 }
 DataConversionErrorMessage:= [DataConversionError]string{
     .NONE = "No Error",
-    .UNKNOWN = "",
-    .DATA_CONVERSION_TYPES_MATCH = "",
+    .UNKNOWN = "Unknown Data Conversion Error",
+    .DATA_CONVERSION_TYPES_MATCH = "Data Types Already Match - No Conversion Needed",
     .DATA_CONVERSION_WITH_TYPE_CHANGE = "Could Not Convert Record Value Based On New Type",
     .DATA_CONVERSION_CANNOT_CONVERT_TO_INTEGER = "Could Not Convert To Integer",
     .DATA_CONVERSION_CANNOT_CONVERT_TO_STRING = "Could Not Convert To String",
     .DATA_CONVERSION_CANNOT_CONVERT_TO_BOOLEAN = "Could Not Convert To Boolean",
     .DATA_CONVERSION_CANNOT_CONVERT_TO_FLOAT = "Could Not Convert To Float",
-    .DATA_CONVERSION_CANNOT_CONVERT_TO_DATE = "",
-    .DATA_CONVERSION_CANNOT_CONVERT_TO_TIME = "",
-    .DATA_CONVERSION_CANNOT_CONVERT_TO_DATETIME = "",
-    .DATA_CONVERSION_CANNOT_CONVERT_TO_UUID = "",
-    .DATA_CONVERSION_CANNOT_CONVERT_TO_INT_ARRAY = "",
-    .DATA_CONVERSION_CANNOT_CONVERT_TO_STR_ARRAY = "",
-    .DATA_CONVERSION_CANNOT_CONVERT_TO_BOOL_ARRAY = "",
-    .DATA_CONVERSION_CANNOT_CONVERT_TO_FLT_ARRAY = "",
-    .DATA_CONVERSION_CANNOT_CONVERT_TO_DATE_ARRAY = "",
-    .DATA_CONVERSION_CANNOT_CONVERT_TO_TIME_ARRAY = "",
-    .DATA_CONVERSION_CANNOT_CONVERT_TO_DT_ARRAY = "",
-    .DATA_CONVERSION_CANNOT_CONVERT_TO_UUID_ARRAY = "",
+    .DATA_CONVERSION_CANNOT_CONVERT_TO_DATE = "Could Not Convert To Date",
+    .DATA_CONVERSION_CANNOT_CONVERT_TO_TIME = "Could Not Convert To Time",
+    .DATA_CONVERSION_CANNOT_CONVERT_TO_DATETIME = "Could Not Convert To DateTime",
+    .DATA_CONVERSION_CANNOT_CONVERT_TO_UUID = "Could Not Convert To UUID",
+    .DATA_CONVERSION_CANNOT_CONVERT_TO_INT_ARRAY = "Could Not Convert To Integer Array",
+    .DATA_CONVERSION_CANNOT_CONVERT_TO_STR_ARRAY = "Could Not Convert To String Array",
+    .DATA_CONVERSION_CANNOT_CONVERT_TO_BOOL_ARRAY = "Could Not Convert To Boolean Array",
+    .DATA_CONVERSION_CANNOT_CONVERT_TO_FLT_ARRAY = "Could Not Convert To Float Array",
+    .DATA_CONVERSION_CANNOT_CONVERT_TO_DATE_ARRAY = "Could Not Convert To Date Array",
+    .DATA_CONVERSION_CANNOT_CONVERT_TO_TIME_ARRAY = "Could Not Convert To Time Array",
+    .DATA_CONVERSION_CANNOT_CONVERT_TO_DT_ARRAY = "Could Not Convert To DateTime Array",
+    .DATA_CONVERSION_CANNOT_CONVERT_TO_UUID_ARRAY = "Could Not Convert To UUID Array",
 
 }
 
@@ -310,7 +310,7 @@ ConfigError:: enum{
 }
 ConfigErrorMessage:=[ConfigError]string{
     .NONE = "No Error",
-    .CONFIG_CANNOT_LOAD_CONFIG = "Could Note Load Configuration",
+    .CONFIG_CANNOT_LOAD_CONFIG = "Could Not Load Configuration",
 }
 
 
@@ -325,6 +325,8 @@ StandardError:: enum{
     STANDARD_CANNOT_WRITE_TO_FILE,
     STANDARD_CANNOT_OPEN_FILE,
     STANDARD_CANNOT_READ_INPUT,
+    STANDARD_CANNOT_GENERATE_CACHE_FILE,
+
 }
 StandardErrorMessage:=[StandardError]string{
     .STANDARD_NONE = "No Error",
@@ -337,6 +339,7 @@ StandardErrorMessage:=[StandardError]string{
     .STANDARD_CANNOT_WRITE_TO_FILE = "Could Not Write To File",
     .STANDARD_CANNOT_OPEN_FILE = "Could Not Open File",
     .STANDARD_CANNOT_READ_INPUT = "Could Not Read User Input",
+    .STANDARD_CANNOT_GENERATE_CACHE_FILE = "Failed To Generate cache.yml file",
 }
 
 ServerError:: enum{
@@ -350,16 +353,33 @@ ServerError:: enum{
 }
 ServerErrorMessage:= [ServerError]string{
     .NONE = "No Error" ,
-    .SERVER_CANNOT_LOG_EVENT = "",
-    .SERVER_NO_BYTES_READ = "",
+    .SERVER_CANNOT_LOG_EVENT = "Server Failed To Log Event",
+    .SERVER_NO_BYTES_READ = "Server Read Zero Bytes From Client Socket",
     .SERVER_CANNOT_LISTEN_ON_SOCKET = "Server Failed To Listen On TCP Socket" ,
     .SERVER_CANNOT_ACCEPT_CONNECTION = "Server Failed To Accept Client TCP Socket Connection" ,
     .SERVER_CANNOT_READ_FROM_SOCKET = "Server Failed To Read From Client TCP Socket" ,
     .SERVER_CANNOT_WRITE_RESPONSE_TO_SOCKET = "Server Failed To Write Response" ,
 }
 
+QueryError :: enum{
+    NONE = 0,
+    QUERY_CANNOT_BE_EMPTY,
+    QUERY_CANNOT_PARSE,
+    QUERY_INVALID_COMMAND_TOKEN,
+    QUERY_INVALID_PARAM_TOKEN,
+}
+
+QueryErrorMessage := [QueryError]string{
+    .NONE= "No Error",
+    .QUERY_CANNOT_BE_EMPTY = "Queries cannot be empty",
+    .QUERY_CANNOT_PARSE = "Failed to parse query",
+    .QUERY_INVALID_COMMAND_TOKEN = "Invalid command token found in query",
+    .QUERY_INVALID_PARAM_TOKEN = "Invalid parameter token(s) found in query"
+}
+
 OstrichError::union{
     // Error Types
+    QueryError,
     UserError,
     ProjectLibraryError,
     ProjectError,
@@ -398,6 +418,10 @@ get_err_msg :: proc(error: OstrichError) -> (string) {
         // return AuthErrorMessage[err] or_else "Unknown authentication error"
     // case ProjectLibraryError:
         // return ProjectLibraryErrorMessage[err] or_else "Unknown project library error"
+    case QueryError:
+        return QueryErrorMessage[err]
+    case UserError:
+        return UserErrorMessage[err]
     case ProjectError:
         return ProjectErrorMessage[err]
     case MetadataError:
@@ -425,7 +449,7 @@ get_err_msg :: proc(error: OstrichError) -> (string) {
 throw_err :: proc(error: ^Error) {
 		fmt.printfln("%s%s[ERROR]%s", RED, BOLD, RESET)
 		fmt.printfln(
-			"ERROR%s occured in...\nFile: [%s%s%s]\nOstrichDB Procedure: [%s%s%s] @ Line: [%s%d%s]\nError Message: [%s%s%s]",
+			"ERROR%s occurred in...\nFile: [%s%s%s]\nOstrichDB Procedure: [%s%s%s] @ Line: [%s%d%s]\nError Message: [%s%s%s]",
 			RESET,
 			BOLD,
 			error.location.file_path,
@@ -451,11 +475,8 @@ make_new_err :: proc(err:OstrichError, location:SourceCodeLocation) -> ^Error{
     error.location = location
 
     throw_err(error)
-    // log_err(fmt.tprintf("%s", error.message), location)
-
     return error
 }
-
 
 // Helper for success case
 no_error :: proc() -> ^Error {

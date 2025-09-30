@@ -6,23 +6,18 @@ import "core:time"
 import "core:c/libc"
 import "core:strings"
 import "core:strconv"
+import "core:text/regex"
 /********************************************************
 Author: Marshall A Burns
 GitHub: @SchoolyB
 
 Copyright (c) 2025-Present Marshall A Burns and Archetype Dynamics, Inc.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+All Rights Reserved.
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+This software is proprietary and confidential. Unauthorized copying,
+distribution, modification, or use of this software, in whole or in part,
+is strictly prohibited without the express written permission of
+Archetype Dynamics, Inc.
 
 File Description:
             This file contains all the logic for interacting with
@@ -37,8 +32,8 @@ read_file :: proc(filePath: string, callingProcedure: SourceCodeLocation) -> ([]
 }
 
 // Helper proc that writes data to a file and returns a success boolean, if the fail thats fine, errors are handled in the caller proc
+@(require_results)
 write_to_file :: proc(filepath: string, data: []byte, callingProcedure: SourceCodeLocation) -> bool {
-	defer delete(data)
     return os.write_entire_file(filepath, data)
 }
 
@@ -58,6 +53,7 @@ get_project_backup_path :: proc(projectContext: ^ProjectContext) -> string {
 
 //Returns the collections directory path for a project
 //Format: {userID}/projects/{projectName}/collections/
+@(require_results)
 get_collections_path:: proc(projectContext: ^ProjectContext) -> string {
     return strings.clone(fmt.tprintf("%scollections/", projectContext.basePath))
 }
@@ -101,14 +97,10 @@ validate_user_directory_structure :: proc(userID: string) -> bool {
 }
 
 //helper to get users input from the command line
+@(deprecated= "This procedure is deprectated  do not use")
 get_input :: proc(isPassword: bool) -> string {
 	buf := new([1024]byte)
 	defer free(buf)
-	// if isPassword {
-		// libc.system("stty -echo")
-	// } else {
-		// libc.system("stty echo")
-	// }
 	n, err := os.read(os.stdin, buf[:])
 	if err != 0 {
 		fmt.printfln("%sINTERNAL ERROR%s: OstrichDB failed to read input from command line.", RED, RESET)
@@ -118,6 +110,9 @@ get_input :: proc(isPassword: bool) -> string {
 	return strings.clone(result)
 }
 
+get_current_time :: proc() -> time.Time{
+    return time.now()
+}
 
 //gets the current date in GMT
 @(require_results)
@@ -185,8 +180,6 @@ get_date_and_time :: proc() -> (gmtDate: string, hour: string, minute: string, s
 	}
 
 	Date := strings.concatenate([]string{Month, " ", Day, " ", Year, " "})
-	defer delete(Date)
-
 
 	return strings.clone(Date), strings.clone(Hour), strings.clone(Minute), strings.clone(Second)
 }
@@ -194,6 +187,7 @@ get_date_and_time :: proc() -> (gmtDate: string, hour: string, minute: string, s
 
 //helper used to append qoutation marks to the beginning and end of a string record values
 //if the value already has qoutation marks then it will not append them
+@(require_results)
 append_qoutations :: proc(value: string) -> string {
 	if strings.contains(value, "\"") {
 		return strings.clone(value)
@@ -202,17 +196,20 @@ append_qoutations :: proc(value: string) -> string {
 }
 
 //helper used to append single qoutation marks to the beginning and end of CHAR record values
-append_single_qoutations__string :: proc(value: string) -> string {
+@(cold, require_results)
+append_single_qoutations_string :: proc(value: string) -> string {
 	if strings.contains(value, "'") {
 		return strings.clone(value)
 	}
 	return strings.clone(fmt.tprintf("'%s'", value))
 }
 
-append_single_qoutations__rune :: proc(value: rune) -> string {
+@(cold, require_results)
+append_single_qoutations_rune :: proc(value: rune) -> string {
 	return strings.clone(fmt.tprintf("'%c'", value))
 }
 
+@(cold, require_results)
 trim_qoutations :: proc(value: string) -> string {
 	if strings.contains(value, "\"") {
 		return strings.clone(strings.trim(value, "\""))
@@ -222,9 +219,24 @@ trim_qoutations :: proc(value: string) -> string {
 
 
 //helper used to strip array brackets from a string, used in internal_conversion.odin
-@(cold)
+@(cold, require_results)
 strip_array_brackets :: proc(value: string) -> string {
 	value := strings.trim_prefix(value, "[")
 	value = strings.trim_suffix(value, "]")
 	return strings.clone(strings.trim_space(value))
+}
+
+contains_disallowed_chars :: proc(input: string) -> bool {
+    pattern, regexCompileError := regex.create(DISALLOWED_CHARS_PATTERN)
+    if regexCompileError != nil {
+        return false
+    }
+    defer regex.destroy(pattern)
+
+    _, matchFound := regex.match(pattern, input) //this returns a capture and idk wtf that is so ignoring - Marshall
+    if matchFound {
+        return true
+    }
+
+    return false
 }

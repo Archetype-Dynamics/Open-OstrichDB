@@ -12,18 +12,12 @@ Author: Marshall A Burns
 GitHub: @SchoolyB
 
 Copyright (c) 2025-Present Marshall A Burns and Archetype Dynamics, Inc.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+All Rights Reserved.
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+This software is proprietary and confidential. Unauthorized copying,
+distribution, modification, or use of this software, in whole or in part,
+is strictly prohibited without the express written permission of
+Archetype Dynamics, Inc.
 
 
 File Description:
@@ -56,9 +50,6 @@ init_dynamic_paths :: proc(environment: string = "") -> ^lib.DynamicPathConfig {
     case:
         config.rootPath = "./"
         config.projectBasePath = "./"
-        config.systemBasePath = "./system/"
-        config.logBasePath = "./logs/"
-        config.tempBasePath = "./tmp/"
     }
 
     //Make sure base directories exist
@@ -71,6 +62,7 @@ init_dynamic_paths :: proc(environment: string = "") -> ^lib.DynamicPathConfig {
 @(require_results)
 create_user_directory_structure :: proc(userID: string) -> bool {
     using fmt
+    using lib
 
     if currentOstrichPathConfig == nil {
         currentOstrichPathConfig = init_dynamic_paths()
@@ -89,9 +81,9 @@ create_user_directory_structure :: proc(userID: string) -> bool {
     }
 
     for dir in userDirectories {
-        if os.make_directory(dir, 0o755) != 0 {
+        result := os.make_directory(dir, FILE_MODE_EXECUTABLE)
+        if result != 0 {
             success = false
-            fmt.printf("Failed to create user directory: %s\n", dir)
         }
     }
 
@@ -140,6 +132,7 @@ get_user_paths :: proc(userID: string) -> lib.UserPathConfig {
 
 //Create base directory and its immediate sub-dirs
 create_base_directories :: proc(config: ^lib.DynamicPathConfig) {
+    using lib
     directories := []string{
         config.rootPath,
         config.systemBasePath,
@@ -148,7 +141,7 @@ create_base_directories :: proc(config: ^lib.DynamicPathConfig) {
     }
 
     for dir in directories {
-        os.make_directory(dir, 0o755)
+        os.make_directory(dir, FILE_MODE_EXECUTABLE)
     }
 }
 

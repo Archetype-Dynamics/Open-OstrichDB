@@ -6,22 +6,18 @@ import "core:strings"
 import "core:encoding/json"
 import "core:encoding/base64"
 import lib "../../library"
+import "../engine/users"
 /********************************************************
 Author: Marshall A Burns
 GitHub: @SchoolyB
 
 Copyright (c) 2025-Present Marshall A Burns and Archetype Dynamics, Inc.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+All Rights Reserved.
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+This software is proprietary and confidential. Unauthorized copying,
+distribution, modification, or use of this software, in whole or in part,
+is strictly prohibited without the express written permission of
+Archetype Dynamics, Inc.
 
 
 File Description:
@@ -65,24 +61,26 @@ extract_user_id_from_auth :: proc(headers: map[string]string) -> (userID: string
         return "ERROR: Empty token after Bearer prefix", false
     }
 
-    extractedID, _, extractSuccess := extract_user_from_jwt(token)
+    user, extractSuccess := extract_user_from_jwt(token)
     if !extractSuccess {
         return "ERROR: Failed to extract user from JWT", false
     }
 
-    return extractedID, true
+    return user.id , true
 }
 
 //Extract the JWT
 @(require_results)
-extract_user_from_jwt :: proc(token: string) -> (userID: string, email: string, success: bool) {
+// extract_user_from_jwt :: proc(token: string) -> (userID: string, email: string, success: bool) {
+    extract_user_from_jwt :: proc(token: string) -> (user: ^lib.User, success: bool) {
     using strings
     using base64
     using json
     using fmt
+    using users
 
     if len(token) == 0 {
-        return "ERROR: Empty token provided", "", false
+        return  make_new_user("ERROR: Empty token provided"), false
     }
 
     // JWT format: header.payload.signature
@@ -90,8 +88,7 @@ extract_user_from_jwt :: proc(token: string) -> (userID: string, email: string, 
     defer delete(parts)
 
     if len(parts) != 3 {
-
-        return tprintf("ERROR: Invalid JWT format: expected 3 parts, got %d\n", len(parts)), "", false
+        return  make_new_user(tprintf("ERROR: Invalid JWT format: expected 3 parts, got %d\n", len(parts))), false
     }
 
     // Get the payload
@@ -106,12 +103,13 @@ extract_user_from_jwt :: proc(token: string) -> (userID: string, email: string, 
     // Decode the payload with error handling
     payloadBytes, decodeError := decode(payload_b64)
     if decodeError != nil {
-        return tprintf("ERROR: Failed to decode JWT payload: %v\n", decodeError), "", false
+        return  make_new_user(tprintf("ERROR: Failed to decode JWT payload: %v\n", decodeError)), false
     }
+
     defer delete(payloadBytes)
 
     if len(payloadBytes) == 0 {
-        return "ERROR: Decoded payload is empty", "", false
+        return  make_new_user("ERROR: Decoded payload is empty"), false
     }
 
     payloadJSON := string(payloadBytes)
@@ -120,15 +118,15 @@ extract_user_from_jwt :: proc(token: string) -> (userID: string, email: string, 
     payloadData: ClerkJWTPayload
     payloadParseError := unmarshal(transmute([]byte)payloadJSON, &payloadData)
     if payloadParseError != nil {
-        return tprintf("ERROR: Failed to parse JWT payload JSON: %v\nRaw payload: %s\n", payloadParseError, payloadJSON), "", false
+        return  make_new_user(tprintf("ERROR: Failed to parse JWT payload JSON: %v\nRaw payload: %s\n", payloadParseError, payloadJSON)), false
     }
 
     // Validate required fields
     if len(payloadData.sub) == 0 {
-        return "ERROR: JWT missing 'sub' field or sub field is empty", "", false
+          return  make_new_user("ERROR: JWT missing 'sub' field or sub field is empty"), false
     }
-
-    return clone(payloadData.sub), clone(payloadData.email), true
+    extractedUser := users.make_new_user(clone(payloadData.sub),clone(payloadData.email))
+    return extractedUser, true
 }
 
 // Basic JWT token validation
@@ -148,39 +146,70 @@ validate_jwt :: proc(token: string) -> bool {
         return false
     }
 
-    _, _, success := extract_user_from_jwt(token)
+    _,success := extract_user_from_jwt(token)
     return success
 }
 
 // Extract user information from Authorization header with safety checks
 @(require_results)
-extract_user_from_auth_header :: proc(headers: map[string]string) -> (userID: string, email: string, success: bool) {
+extract_user_from_auth_header :: proc(headers: map[string]string) -> (user: ^lib.User, success: bool) {
     using strings
+    using users
 
     authHeader, hasAuth := headers["Authorization"]
     if !hasAuth {
-        return "", "", false
+        return make_new_user(), false
     }
 
     if !has_prefix(authHeader, "Bearer ") {
-        return "", "", false
+        return make_new_user(), false
     }
 
     token := trim_prefix(authHeader, "Bearer ")
     token = trim_space(token)
 
     if !validate_jwt(token) {
-        return "", "", false
+        return make_new_user(), false
     }
 
     return extract_user_from_jwt(token)
 }
 
-// Middleware function to check authentication
+// Middleware function to check authentication also handles creating users logging dir and files
 @(require_results)
 require_authentication :: proc(headers: map[string]string) -> (userID: string, authenticated: bool) {
     using fmt
+    extractedUser, success := extract_user_from_auth_header(headers)
+    if success== true{
+        newUser:= users.make_new_user(extractedUser.id)
 
-    extractedUserID, _, success := extract_user_from_auth_header(headers)
-    return extractedUserID, success
+        dirCreated:= users.make_user_log_dir(newUser)
+        filesCreated:= users.create_user_logs(newUser)
+        rateLimitSetup:= users.setup_user_rate_limiting(newUser)
+}
+
+    return extractedUser.id, success
+}
+
+@(require_results)
+require_authentication_with_rate_limit :: proc(headers: map[string]string, rateLimitPerMinute: int) -> (userID: string, authenticated: bool, rateLimited: bool) {
+    using fmt
+    
+    extractedUser, success := extract_user_from_auth_header(headers)
+    if success != true {
+        return extractedUser.id, false, false
+    }
+
+    newUser := users.make_new_user(extractedUser.id)
+    
+    dirCreated := users.make_user_log_dir(newUser)
+    filesCreated := users.create_user_logs(newUser)
+    rateLimitSetup := users.setup_user_rate_limiting(newUser)
+
+    allowed, rateLimitErr := users.check_rate_limit(newUser, rateLimitPerMinute)
+    if rateLimitErr != nil || !allowed {
+        return extractedUser.id, true, true
+    }
+
+    return extractedUser.id, true, false
 }

@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:strings"
 import "core:strconv"
 import "core:math/rand"
+import "../users"
 import "../../config"
 import lib "../../../library"
 /********************************************************
@@ -12,29 +13,18 @@ Author: Marshall A Burns
 GitHub: @SchoolyB
 
 Copyright (c) 2025-Present Marshall A Burns and Archetype Dynamics, Inc.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+All Rights Reserved.
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+This software is proprietary and confidential. Unauthorized copying,
+distribution, modification, or use of this software, in whole or in part,
+is strictly prohibited without the express written permission of
+Archetype Dynamics, Inc.
 
 
 File Description:
             This file contains all the logic for interacting with
             clusters within the OstrichDB engine.
 *********************************************************/
-
-//Dont worry about why I have these
-TAB_NEW_R_BRACE := "\t\n},"
-R_BRACE_COMMA   := "\n},\n"
-NEWLINE         := "\n"
 
 //Allocates memory for a new lib.Cluster, then returns a pointer to it. Remember to free() in calling procedure
 @(require_results)
@@ -43,7 +33,7 @@ make_new_cluster :: proc(collection: ^lib.Collection, clusterName: string) -> ^l
 
     cluster := new(Cluster)
     cluster.parent = collection^
-	cluster.name = clusterName //Todo: add a check for the length of and special chars in the name
+	cluster.name = clusterName
 	cluster.id = 0 //numbers will be auto-incremented per collections
 	cluster.numberOfRecords = 0
 	cluster.records= make([dynamic]Record, 0)
@@ -60,18 +50,40 @@ create_cluster_block_in_collection :: proc(projectContext: ^lib.ProjectContext, 
     buf:= new([32]byte)
     defer free(buf)
 
+    isValidName, validityCheckError:= valid_cluster_name(cluster)
+    if validityCheckError != nil || isValidName == false {
+        users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+            severity = .ERROR,
+            description = "Invalid cluster name provided",
+            type = .CREATE_OPERATION,
+            timestamp = get_current_time()
+        })
+        return validityCheckError
+    }
 
     collectionPath := get_specific_collection_full_path(projectContext, collection) //Check to ensure the collection the user wants to create the cluster in exists
     defer delete(collectionPath)
 
     collectionExists, checkError:= check_if_collection_exists(projectContext,collection)
     if !collectionExists || checkError != nil{
+        users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("Provided Collection: %s not found", collection.name),
+            type = .CREATE_OPERATION,
+            timestamp = get_current_time()
+        })
         return make_new_err(.COLLECTION_NOT_FOUND, get_caller_location())
     }
 
     //Now check to see if there is already a cluster that exists with the name
     clusterAlreadyExists, _:= check_if_cluster_exsists_in_collection(projectContext, collection, cluster)
     if clusterAlreadyExists {
+        users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("Cluster: %s already exists", cluster.name),
+            type = .CREATE_OPERATION,
+            timestamp = get_current_time()
+        })
         return  make_new_err(.CLUSTER_ALREADY_EXISTS, get_caller_location())
     }
 
@@ -80,8 +92,14 @@ create_cluster_block_in_collection :: proc(projectContext: ^lib.ProjectContext, 
     clusterIDLine:[]string= {"\n\tcluster_id :identifier: %i\n\t\n},\n\n"}
 
 
-    file, openSuccess := os.open(collectionPath, os.O_APPEND | os.O_WRONLY, 0o666)
+    file, openSuccess := os.open(collectionPath, os.O_APPEND | os.O_WRONLY, FILE_MODE_RW_ALL)
     if openSuccess != 0 {
+        users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("Unable to open Collection: %s while creating Cluster: %s", collection.name, cluster.name),
+            type = .CREATE_OPERATION,
+            timestamp = get_current_time()
+        })
         return make_new_err(.COLLECTION_CANNOT_OPEN, get_caller_location())
     }
 
@@ -91,11 +109,23 @@ create_cluster_block_in_collection :: proc(projectContext: ^lib.ProjectContext, 
             newClusterName, replaceSuccess := strings.replace(clusterNameLine[i], "%n", cluster.name, -1)
             defer delete(newClusterName)
             if !replaceSuccess{
+                users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+                    severity = .ERROR,
+                    description = fmt.tprintf("Unable to modify Cluster: %s", cluster.name),
+                    type = .CREATE_OPERATION,
+                    timestamp = get_current_time()
+                })
                 return make_new_err(.CLUSTER_CANNOT_UPDATE, get_caller_location())
             }
 
             _ , writeSuccess:= os.write(file, transmute([]u8)newClusterName)
             if writeSuccess != 0{
+                users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+                    severity = .ERROR,
+                    description = fmt.tprintf("Could not write new Cluster: %s to Collection: %s not found", cluster.name, collection.name),
+                    type = .CREATE_OPERATION,
+                    timestamp = get_current_time()
+                })
                 return make_new_err(.COLLECTION_CANNOT_WRITE, get_caller_location())
             }
         }
@@ -103,6 +133,12 @@ create_cluster_block_in_collection :: proc(projectContext: ^lib.ProjectContext, 
     //get the current count of clusters in the collection.
     clusterIDCount, clusterCountErrors:=  get_cluster_count_within_collection(projectContext, collection)
     if clusterCountErrors != nil{
+        users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("Could not get accurate cluster ID count in Collection: %s",collection.name),
+            type = .CREATE_OPERATION,
+            timestamp = get_current_time()
+        })
         return make_new_err(.CLUSTER_CANNOT_UPDATE, get_caller_location())
     }
 
@@ -114,11 +150,23 @@ create_cluster_block_in_collection :: proc(projectContext: ^lib.ProjectContext, 
             newClusterID, replaceSuccess:= strings.replace(clusterIDLine[i], "%i", strconv.append_int(buf[:], cluster.id, 10), -1)
             defer delete(newClusterID)
             if !replaceSuccess{
+                users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+                    severity = .ERROR,
+                    description = "Could not replace cluster template when creating cluster",
+                    type = .CREATE_OPERATION,
+                    timestamp = get_current_time()
+                })
                 return make_new_err(.CLUSTER_CANNOT_UPDATE, get_caller_location())
             }
 
             _ , writeSuccess:= os.write(file, transmute([]u8)newClusterID)
             if writeSuccess != 0{
+                users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+                    severity = .ERROR,
+                    description = fmt.tprintf("Could not write new Cluster: %s to Collection: %s not found", cluster.name, collection.name),
+                    type = .CREATE_OPERATION,
+                    timestamp = get_current_time()
+                })
                 return make_new_err(.CLUSTER_CANNOT_WRITE, get_caller_location())
             }
         }
@@ -134,22 +182,44 @@ rename_cluster :: proc(projectContext: ^lib.ProjectContext,collection: ^lib.Coll
     using lib
     using fmt
 
-    // Check if a cluster with the new name already exists
     newCluster:= make_new_cluster(collection, newName)
     defer free(newCluster)
 
+    isValidName, validityCheckError:= valid_cluster_name(newCluster)
+    if validityCheckError != nil || isValidName == false {
+        users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("Invalid Cluster name provided: %s", cluster.name),
+            type = .UPDATE_OPERATION,
+            timestamp = get_current_time()
+        })
+        return validityCheckError
+    }
+
     clusterExistsInCollection, _ := check_if_cluster_exsists_in_collection(projectContext,collection, newCluster)
     if clusterExistsInCollection {
+        users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("Cluster: %s already exists in Collection: %s" , cluster.name, collection.name),
+            type = .UPDATE_OPERATION,
+            timestamp = get_current_time()
+        })
         return make_new_err(.CLUSTER_ALREADY_EXISTS, get_caller_location())
     }
 
     // Use the standardized parser to get the entire collection
     parsedCollection, parseError := parse_entire_collection(projectContext, collection)
-    defer free(&parsedCollection)
 
     if parseError != nil {
+        users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+            severity = .CRITICAL,
+            description = fmt.tprintf("Critical error parsing Collection: %s", collection.name),
+            type = .UPDATE_OPERATION,
+            timestamp = get_current_time()
+        })
         return parseError
     }
+    defer free(&parsedCollection)
 
     // Check if the target cluster exists in the parsed data
     targetClusterFound := false
@@ -161,6 +231,12 @@ rename_cluster :: proc(projectContext: ^lib.ProjectContext,collection: ^lib.Coll
     }
 
     if !targetClusterFound {
+        users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("OstrichDB was unable to find target Cluster: %s in Collection: %s", cluster.name, collection.name),
+            type = .UPDATE_OPERATION,
+            timestamp = get_current_time()
+        })
         return make_new_err(.CLUSTER_NOT_FOUND, get_caller_location())
     }
 
@@ -176,6 +252,12 @@ rename_cluster :: proc(projectContext: ^lib.ProjectContext,collection: ^lib.Coll
                 fmt.tprintf("cluster_name :identifier: %s", newName), 1)
 
             if !replaceError {
+                users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+                    severity = .ERROR,
+                    description = fmt.tprintf("Unable to replace Cluster name: %s", cluster.name),
+                    type = .UPDATE_OPERATION,
+                    timestamp = get_current_time()
+                })
                 return make_new_err(.CLUSTER_CANNOT_UPDATE, get_caller_location())
             }
 
@@ -202,6 +284,12 @@ rename_cluster :: proc(projectContext: ^lib.ProjectContext,collection: ^lib.Coll
 
     writeSuccess := write_to_file(collectionPath, transmute([]byte)newCollectionContent, get_caller_location())
     if !writeSuccess {
+        users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("Could not write renamed Cluster to Collection : %s", collection.name),
+            type = .UPDATE_OPERATION,
+            timestamp = get_current_time()
+        })
         return make_new_err(.CLUSTER_CANNOT_WRITE, get_caller_location())
     }
 
@@ -213,11 +301,17 @@ erase_cluster :: proc(projectContext: ^lib.ProjectContext, collection: ^lib.Coll
     using lib
 
     parsedCollection, parseError := parse_entire_collection(projectContext, collection)
-    defer free(&parsedCollection)
 
     if parseError != nil {
+        users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+            severity = .CRITICAL,
+            description = fmt.tprintf("Critical Error unable to pasre collection: %s", collection.name),
+            type = .DELETE_OPERATION,
+            timestamp = get_current_time()
+        })
         return parseError
     }
+    defer free(&parsedCollection)
 
     targetClusterFound := false
     for parsedCluster in parsedCollection.body.clusters {
@@ -276,6 +370,12 @@ erase_cluster :: proc(projectContext: ^lib.ProjectContext, collection: ^lib.Coll
 
     writeSuccess := write_to_file(collectionPath, transmute([]byte)newCollectionContent, get_caller_location())
     if !writeSuccess {
+        users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+            severity = .ERROR,
+            description = fmt.tprintf("Could not deleted Cluster: %s from Collection: %s", cluster.name, collection.name),
+            type = .DELETE_OPERATION,
+            timestamp = get_current_time()
+        })
         return make_new_err(.COLLECTION_CANNOT_WRITE, get_caller_location())
     }
 
@@ -291,11 +391,17 @@ fetch_cluster ::proc(projectContext: ^lib.ProjectContext,collection: ^lib.Collec
     using config
 
     parsedCluster, parseError := parse_specific_cluster(projectContext, collection, cluster.name)
-    defer free(&parsedCluster)
 
     if parseError != nil {
+        users.log_error_event(users.make_new_user(projectContext.userID), &ErrorEvent{
+            severity = .CRITICAL,
+            description = fmt.tprintf("Critical error could not parse Colleciton: %s", collection.name),
+            type = .READ_OPERATION,
+            timestamp = get_current_time()
+        })
         return "", parseError
     }
+    defer free(&parsedCluster)
 
     return strings.clone(parsedCluster.rawContent), no_error()
 }
@@ -309,11 +415,11 @@ purge_cluster ::proc(projectContext: ^lib.ProjectContext,collection: ^lib.Collec
 
     // Use the standardized parser to get the entire collection
     parsedCollection, parseError := parse_entire_collection(projectContext, collection)
-    defer free(&parsedCollection)
 
     if parseError != nil {
         return parseError
     }
+    defer free(&parsedCollection)
 
     // Create new body content with purged cluster
     newBodyContent := make([dynamic]u8)
@@ -452,11 +558,11 @@ get_clusters_id_by_name :: proc(projectContext: ^lib.ProjectContext, collection:
 
     // Use the parser to get the specific cluster
     parsedCluster, parseError := parse_specific_cluster(projectContext, collection, cluster.name)
-    defer free(&parsedCluster)
 
     if parseError != nil {
         return -1, parseError
     }
+    defer free(&parsedCluster)
 
     return parsedCluster.id, no_error()
 }
@@ -519,11 +625,11 @@ get_cluster_size ::proc(projectContext: ^lib.ProjectContext,collection: ^lib.Col
 
     // Use the parser to get the specific cluster
     parsedCluster, parseError := parse_specific_cluster(projectContext, collection, cluster.name)
-    defer free(&parsedCluster)
 
     if parseError != nil {
         return -3, parseError
     }
+    defer free(&parsedCluster)
 
     // Calculate size by parsing the raw content and excluding metadata
     lines := strings.split(parsedCluster.rawContent, "\n")
@@ -565,3 +671,13 @@ get_cluster_count_within_collection ::proc(projectContext: ^lib.ProjectContext, 
 
     return clusterCount, no_error()
 }
+
+@(require_results)
+valid_cluster_name :: proc(cluster: ^lib.Cluster) -> (bool, ^lib.Error){
+    using lib
+    //Name len check and invalid char check
+    if len(cluster.name) > MAX_DATA_STRUCURE_NAME_LEN || contains_disallowed_chars(cluster.name) do return false, make_new_err(.CLUSTER_NAME_INVALID, get_caller_location())
+
+    return true, no_error()
+}
+

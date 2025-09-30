@@ -12,6 +12,8 @@ import "../engine/data"
 import lib "../../library"
 import "../engine/projects"
 import "../engine/security"
+import "../engine/users"
+import "../engine/queries"
 /********************************************************
 Author: Marshall A Burns
 GitHub: @SchoolyB
@@ -20,18 +22,12 @@ Contributors:
                     @CobbCoding1
 
 Copyright (c) 2025-Present Marshall A Burns and Archetype Dynamics, Inc.
+All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+This software is proprietary and confidential. Unauthorized copying,
+distribution, modification, or use of this software, in whole or in part,
+is strictly prohibited without the express written permission of
+Archetype Dynamics, Inc.
 
 File Description:
             Contains logic for handling requests from the client.
@@ -58,507 +54,6 @@ The handlers in this file handle the following routes:
 If new endpoints or handlers are added, be sure to add them above :) - Marshall
 *********************************************************/
 
-// Extract project context from request path
-@(require_results)
-extract_project_context :: proc(path: string, headers: map[string]string) -> (^lib.ProjectContext, bool) {
-    using strings
-    using projects
-    using config
-
-    // Expected format: /api/v1/projects/{project_name}/...
-    segments := split_path_into_segments(path)
-
-    if len(segments) < 3 || segments[0] != "api" || segments[1] != "v1" || segments[2] != "projects" {
-        return nil, false
-    }
-
-    // For route: /api/v1/projects - we still need userID for listing
-    if len(segments) == 3 {
-        userID, authenticated := require_authentication(headers)
-        if !authenticated {
-            return nil, false
-        }
-
-        // Create a minimal project context just for project listing
-        projectContext := make_new_project_context(userID, "", "")
-        return projectContext, true
-    }
-
-    if len(segments) < 4 {
-        return nil, false
-    }
-
-    projectName := segments[3]
-
-    userID, authenticated := require_authentication(headers)
-    if !authenticated || userID == "" {
-        return nil, false
-    }
-
-    if !user_directory_exists(userID) {
-        if !create_user_directory_structure(userID) {
-            fmt.printf("ERROR: Failed to create user directory for: %s\n", userID)
-            return nil, false
-        }
-        fmt.printf("INFO: Created user directory structure for new user: %s\n", userID)
-    }
-
-    // Create project context with user isolation
-    projectContext := make_new_project_context(userID, projectName)
-    if projectContext == nil {
-        return nil, false
-    }
-
-    // Verify project access
-    if !verify_project_access(projectContext, userID) {
-        fmt.printf("ERROR: User %s does not have access to project %s\n", userID, projectName)
-        free(projectContext)
-        return nil, false
-    }
-
-    return projectContext, true
-}
-
-//Collective proc of the below proces
-@(private)
-secure_collection_operation :: proc{
-    secure_collection_operation_basic,
-    secure_collection_operation_with_cluster,
-    secure_collection_operation_with_cluster_and_record,
-    secure_collection_operation_with_cluster_and_path,
-    secure_collection_operation_with_cluster_record_and_query,
-    secure_collection_operation_with_query_params,
-    secure_collection_operation_with_cluster_and_query_params,
-}
-
-//Helper proc that checks encryption state of collection, decrypts, performs desired operation, then re-encrypts
-@(private)
-secure_collection_operation_basic :: proc(projectContext: ^lib.ProjectContext, collectionName: string, operation: proc(^lib.ProjectContext, ^lib.Collection) -> (string, ^lib.Error)) -> (^lib.HttpStatus, string) {
-    using lib
-    using data
-    using security
-
-    collection := make_new_collection(collectionName, .STANDARD)
-
-    // Check if collection exists
-    exists, _ := check_if_collection_exists(projectContext, collection)
-    if !exists {
-        return make_new_http_status(.NOT_FOUND, HttpStatusText[.NOT_FOUND]),
-               fmt.tprintf("Collection %s not found\n", collectionName)
-    }
-
-    // Get encryption state
-    encState, stateErr := get_metadata_field_value(projectContext, collection, "Encryption State")
-    if stateErr != nil {
-        //If the encryption state metadata field isnt read then assume its NOT encrypted
-        encState = "0"
-    }
-
-    isEncrypted := encState == "1"
-
-    // If the collection is indeed encrypted, decrypt before do the operation
-    if isEncrypted {
-        masterKey, keyErr := get_user_master_key(projectContext.userID)
-        if keyErr != nil {
-            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Failed to get encryption key\n"
-        }
-        defer clear_key_from_memory(masterKey)
-
-        decryptedData, decErr := decrypt_collection(projectContext, collection, masterKey)
-        if decErr != nil {
-            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Failed to decrypt collection: %s\n"
-        }
-    }
-
-    // Perform the operation
-    result, operationError := operation(projectContext, collection)
-
-    // Re-encrypt
-    if isEncrypted {
-        masterKey, keyErr := get_user_master_key(projectContext.userID)
-        if keyErr == nil {
-            defer clear_key_from_memory(masterKey)
-            encrypt_collection(projectContext, collection, masterKey)
-        }
-    }
-
-    if operationError != nil {
-        return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Operation failed\n"
-
-    }
-
-    free_all()
-    return make_new_http_status(.OK, HttpStatusText[.OK]), result
-}
-
-//Note: The following helper procedures are needed to decrypt a Collection before performing opertations on "lower tier" data structures - Marshall
-
-//Collection + Cluster operations
-@(private)
-secure_collection_operation_with_cluster :: proc(projectContext: ^lib.ProjectContext, collectionName: string, clusterName: string, operation: proc(^lib.ProjectContext, ^lib.Collection, ^lib.Cluster) -> (string, ^lib.Error)) -> (^lib.HttpStatus, string) {
-    using lib
-    using data
-    using security
-
-    collection := make_new_collection(collectionName, .STANDARD)
-
-    // Check if collection exists
-    exists, _ := check_if_collection_exists(projectContext, collection)
-    if !exists {
-        return make_new_http_status(.NOT_FOUND, HttpStatusText[.NOT_FOUND]),
-               fmt.tprintf("Collection %s not found\n", collectionName)
-    }
-
-    // Create cluster
-    cluster := make_new_cluster(collection, clusterName)
-
-    // Get encryption state
-    encState, stateErr := get_metadata_field_value(projectContext, collection, "Encryption State")
-    if stateErr != nil {
-        encState = "0"
-    }
-
-    isEncrypted := encState == "1"
-
-    // If the collection is indeed encrypted, decrypt before do the operation
-    if isEncrypted {
-        masterKey, keyErr := get_user_master_key(projectContext.userID)
-        if keyErr != nil {
-            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Failed to get encryption key\n"
-        }
-        defer clear_key_from_memory(masterKey)
-
-        _, decErr := decrypt_collection(projectContext, collection, masterKey)
-        if decErr != nil {
-            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Failed to decrypt collection: %s\n"
-        }
-    }
-
-    // Perform the operation
-    result, operationError := operation(projectContext, collection, cluster)
-
-    // Re-encrypt
-    if isEncrypted {
-        masterKey, keyErr := get_user_master_key(projectContext.userID)
-        if keyErr == nil {
-            defer clear_key_from_memory(masterKey)
-            encrypt_collection(projectContext, collection, masterKey)
-        }
-    }
-
-    if operationError != nil {
-        return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Operation failed\n"
-    }
-
-    free_all()
-    return make_new_http_status(.OK, HttpStatusText[.OK]), result
-}
-
-//Collection + Cluster + Record operations
-@(private)
-secure_collection_operation_with_cluster_and_record :: proc(projectContext: ^lib.ProjectContext, collectionName: string, clusterName: string, recordName: string, operation: proc(^lib.ProjectContext, ^lib.Collection, ^lib.Cluster, ^lib.Record) -> (string, ^lib.Error)) -> (^lib.HttpStatus, string) {
-    using lib
-    using data
-    using security
-
-    collection := make_new_collection(collectionName, .STANDARD)
-
-    // Check if collection exists
-    exists, _ := check_if_collection_exists(projectContext, collection)
-    if !exists {
-        return make_new_http_status(.NOT_FOUND, HttpStatusText[.NOT_FOUND]),
-               fmt.tprintf("Collection %s not found\n", collectionName)
-    }
-
-    // Create cluster and record
-    cluster := make_new_cluster(collection, clusterName)
-    record := make_new_record(collection, cluster, recordName)
-
-    // Get encryption state
-    encState, stateErr := get_metadata_field_value(projectContext, collection, "Encryption State")
-    if stateErr != nil {
-        encState = "0"
-    }
-
-    isEncrypted := encState == "1"
-
-    // If the collection is indeed encrypted, decrypt before do the operation
-    if isEncrypted {
-        masterKey, keyErr := get_user_master_key(projectContext.userID)
-        if keyErr != nil {
-            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Failed to get encryption key\n"
-        }
-        defer clear_key_from_memory(masterKey)
-
-        _, decErr := decrypt_collection(projectContext, collection, masterKey)
-        if decErr != nil {
-            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Failed to decrypt collection: %s\n"
-        }
-    }
-
-    // Perform the operation
-    result, operationError := operation(projectContext, collection, cluster, record)
-
-    // Re-encrypt
-    if isEncrypted {
-        masterKey, keyErr := get_user_master_key(projectContext.userID)
-        if keyErr == nil {
-            defer clear_key_from_memory(masterKey)
-            encrypt_collection(projectContext, collection, masterKey)
-        }
-    }
-
-    if operationError != nil {
-        return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Operation failed\n"
-    }
-
-    free_all()
-    return make_new_http_status(.OK, HttpStatusText[.OK]), result
-}
-
-//Collection + Cluster operations with query parameters
-@(private)
-secure_collection_operation_with_cluster_and_path :: proc(projectContext: ^lib.ProjectContext, collectionName: string, clusterName: string, requestPath: string, operation: proc(^lib.ProjectContext, ^lib.Collection, ^lib.Cluster, string) -> (string, ^lib.Error)) -> (^lib.HttpStatus, string) {
-    using lib
-    using data
-    using security
-
-    collection := make_new_collection(collectionName, .STANDARD)
-    // defer free(collection)
-
-    // Check if collection exists
-    exists, _ := check_if_collection_exists(projectContext, collection)
-    if !exists {
-        return make_new_http_status(.NOT_FOUND, HttpStatusText[.NOT_FOUND]),
-               fmt.tprintf("Collection %s not found\n", collectionName)
-    }
-
-    // Create cluster
-    cluster := make_new_cluster(collection, clusterName)
-
-    // Get encryption state
-    encState, stateErr := get_metadata_field_value(projectContext, collection, "Encryption State")
-    if stateErr != nil {
-        encState = "0"
-    }
-
-    isEncrypted := encState == "1"
-
-    // If the collection is indeed encrypted, decrypt before do the operation
-    if isEncrypted {
-        masterKey, keyErr := get_user_master_key(projectContext.userID)
-        if keyErr != nil {
-            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Failed to get encryption key\n"
-        }
-        defer clear_key_from_memory(masterKey)
-
-        _, decErr := decrypt_collection(projectContext, collection, masterKey)
-        if decErr != nil {
-            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Failed to decrypt collection: %s\n"
-        }
-    }
-
-    // Perform the operation
-    result, operationError := operation(projectContext, collection, cluster, requestPath)
-
-    // Re-encrypt
-    if isEncrypted {
-        masterKey, keyErr := get_user_master_key(projectContext.userID)
-        if keyErr == nil {
-            defer clear_key_from_memory(masterKey)
-            encrypt_collection(projectContext, collection, masterKey)
-        }
-    }
-
-    if operationError != nil {
-        return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Operation failed\n"
-    }
-
-    free_all()
-    return make_new_http_status(.OK, HttpStatusText[.OK]), result
-}
-
-//Collection + Cluster + Record operations with query parameters
-@(private)
-secure_collection_operation_with_cluster_record_and_query :: proc(projectContext: ^lib.ProjectContext, collectionName: string, clusterName: string, recordName: string, queryParams: map[string]string, operation: proc(^lib.ProjectContext, ^lib.Collection, ^lib.Cluster, ^lib.Record, map[string]string) -> (string, ^lib.Error)) -> (^lib.HttpStatus, string) {
-    using lib
-    using data
-    using security
-
-    collection := make_new_collection(collectionName, .STANDARD)
-
-    // Check if collection exists
-    exists, _ := check_if_collection_exists(projectContext, collection)
-    if !exists {
-        return make_new_http_status(.NOT_FOUND, HttpStatusText[.NOT_FOUND]),
-               fmt.tprintf("Collection %s not found\n", collectionName)
-    }
-
-    // Create cluster and record
-    cluster := make_new_cluster(collection, clusterName)
-    record := make_new_record(collection, cluster, recordName)
-
-    // Get encryption state
-    encState, stateErr := get_metadata_field_value(projectContext, collection, "Encryption State")
-    if stateErr != nil {
-        encState = "0"
-    }
-
-    isEncrypted := encState == "1"
-
-    // If the collection is indeed encrypted, decrypt before do the operation
-    if isEncrypted {
-        masterKey, keyErr := get_user_master_key(projectContext.userID)
-        if keyErr != nil {
-            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Failed to get encryption key\n"
-        }
-        defer clear_key_from_memory(masterKey)
-
-        _, decErr := decrypt_collection(projectContext, collection, masterKey)
-        if decErr != nil {
-            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Failed to decrypt collection: %s\n"
-        }
-    }
-
-    // Perform the operation
-    result, operationError := operation(projectContext, collection, cluster, record, queryParams)
-
-    // Re-encrypt
-    if isEncrypted {
-        masterKey, keyErr := get_user_master_key(projectContext.userID)
-        if keyErr == nil {
-            defer clear_key_from_memory(masterKey)
-            encrypt_collection(projectContext, collection, masterKey)
-        }
-    }
-
-    if operationError != nil {
-        return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Operation failed\n"
-    }
-
-    free_all()
-    return make_new_http_status(.CREATE, HttpStatusText[.CREATE]), result
-}
-
-//Collection operations with query parameters e.g: Renaming
-@(private)
-secure_collection_operation_with_query_params :: proc(projectContext: ^lib.ProjectContext, collectionName: string, queryParams: map[string]string, operation: proc(^lib.ProjectContext, ^lib.Collection, map[string]string) -> (string, ^lib.Error)) -> (^lib.HttpStatus, string) {
-    using lib
-    using data
-    using security
-
-    collection := make_new_collection(collectionName, .STANDARD)
-
-    // Check if collection exists
-    exists, _ := check_if_collection_exists(projectContext, collection)
-    if !exists {
-        return make_new_http_status(.NOT_FOUND, HttpStatusText[.NOT_FOUND]),
-               fmt.tprintf("Collection %s not found\n", collectionName)
-    }
-
-    // Get encryption state
-    encState, stateErr := get_metadata_field_value(projectContext, collection, "Encryption State")
-    if stateErr != nil {
-        encState = "0"
-    }
-
-    isEncrypted := encState == "1"
-
-    // If the collection is indeed encrypted, decrypt before do the operation
-    if isEncrypted {
-        masterKey, keyErr := get_user_master_key(projectContext.userID)
-        if keyErr != nil {
-            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Failed to get encryption key\n"
-        }
-        defer clear_key_from_memory(masterKey)
-
-        _, decErr := decrypt_collection(projectContext, collection, masterKey)
-        if decErr != nil {
-            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Failed to decrypt collection: %s\n"
-        }
-    }
-
-    // Perform the operation
-    result, operationError := operation(projectContext, collection, queryParams)
-
-    // Re-encrypt
-    if isEncrypted {
-        masterKey, keyErr := get_user_master_key(projectContext.userID)
-        if keyErr == nil {
-            defer clear_key_from_memory(masterKey)
-            encrypt_collection(projectContext, collection, masterKey)
-        }
-    }
-
-    if operationError != nil {
-        return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Operation failed\n"
-    }
-
-    free_all()
-    return make_new_http_status(.OK, HttpStatusText[.OK]), result
-}
-
-//Collection + Cluster operations with query parameters e.g: Renaming
-@(private)
-secure_collection_operation_with_cluster_and_query_params :: proc(projectContext: ^lib.ProjectContext, collectionName: string, clusterName: string, queryParams: map[string]string, operation: proc(^lib.ProjectContext, ^lib.Collection, ^lib.Cluster, map[string]string) -> (string, ^lib.Error)) -> (^lib.HttpStatus, string) {
-    using lib
-    using data
-    using security
-
-    collection := make_new_collection(collectionName, .STANDARD)
-
-    // Check if collection exists
-    exists, _ := check_if_collection_exists(projectContext, collection)
-    if !exists {
-        return make_new_http_status(.NOT_FOUND, HttpStatusText[.NOT_FOUND]),
-               fmt.tprintf("Collection %s not found\n", collectionName)
-    }
-
-    // Create cluster
-    cluster := make_new_cluster(collection, clusterName)
-
-    // Get encryption state
-    encState, stateErr := get_metadata_field_value(projectContext, collection, "Encryption State")
-    if stateErr != nil {
-        encState = "0"
-    }
-
-    isEncrypted := encState == "1"
-
-    // If the collection is indeed encrypted, decrypt before do the operation
-    if isEncrypted {
-        masterKey, keyErr := get_user_master_key(projectContext.userID)
-        if keyErr != nil {
-            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Failed to get encryption key\n"
-        }
-        defer clear_key_from_memory(masterKey)
-
-        _, decErr := decrypt_collection(projectContext, collection, masterKey)
-        if decErr != nil {
-            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Failed to decrypt collection: %s\n"
-        }
-    }
-
-    // Perform the operation
-    result, operationError := operation(projectContext, collection, cluster, queryParams)
-
-    // Re-encrypt
-    if isEncrypted {
-        masterKey, keyErr := get_user_master_key(projectContext.userID)
-        if keyErr == nil {
-            defer clear_key_from_memory(masterKey)
-            encrypt_collection(projectContext, collection, masterKey)
-        }
-    }
-
-    if operationError != nil {
-        return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),"Operation failed\n"
-    }
-
-    free_all()
-    return make_new_http_status(.OK, HttpStatusText[.OK]), result
-}
-
 //This proc is a great template on how the remaining request handling procedure will generally work
 //Note: See all comments to help understand flow of this proc
 handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[string]string, args: []string = {""}) -> (^lib.HttpStatus, string) {
@@ -571,9 +66,53 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
         return make_new_http_status(.BAD_REQUEST, HttpStatusText[.BAD_REQUEST]), "Request Failed: Method not allowed\n"
     }
 
-    userID, authenticated := require_authentication(headers)
+    appConfig := config.get_config()
+    userID, authenticated, rateLimited := require_authentication_with_rate_limit(headers, appConfig.security.rateLimitRequestsPerMinute)
+
     if !authenticated {
         return make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED]), "Unauthorized - valid JWT token required\n"
+    }
+
+    if rateLimited {
+        return make_new_http_status(.TOO_MANY_REQUESTS, HttpStatusText[.TOO_MANY_REQUESTS]), "Rate limit exceeded - too many requests\n"
+    }
+
+    segments := split_path_into_segments(path)
+    numberOfSegments := len(segments)
+
+    //Route: /api/v1/user/{user_id}/logs/*
+    // if numberOfSegments == 6 && segments[2] == "user" && segments[4] == "logs"{
+    if numberOfSegments == 6 && segments[2] == "user" && segments[4] == "logs"{
+
+        userID, authenticated := require_authentication(headers)
+        currentUser:= users.make_new_user(userID)
+
+        logType: users.LOG_TYPE
+        if !authenticated {
+            return make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED]), "Unauthorized - valid JWT token required\n"
+        }
+
+        switch(segments[5]){
+            case "errors":
+                logType = .ERROR
+                break
+            case "server":
+                logType = .SERVER
+                break
+        }
+
+        logData, getLogError:= users.get_user_log(currentUser, logType)
+        if getLogError != nil {
+            users.log_user_server_event(currentUser, users.make_new_server_event(
+            fmt.tprintf("Failed to fetch user %s logs", segments[5]),
+            ServerEventType.ERROR, time.now(), true, "/api/v1/user/*/logs", .GET,))
+            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]), fmt.tprintf("Request Failed: Unable to get %s logs at this time.\n", segments[5])
+        }
+
+        users.log_user_server_event(currentUser, users.make_new_server_event(
+        fmt.tprintf("Successfully fetched user %s logs", segments[5]),
+        ServerEventType.SUCCESS, time.now(), true, "/api/v1/user/*/logs", .GET,))
+        return make_new_http_status(.OK, HttpStatusText[.OK]), string(logData)
     }
 
     // Extract project context
@@ -582,16 +121,25 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
         return make_new_http_status(.CONFLICT, HttpStatusText[.CONFLICT]), "Request Failed: Unauthorized or invalid project\n"
     }
 
-    segments := split_path_into_segments(path)
-    numberOfSegments := len(segments)
-
     // Route: /api/v1/projects
     // Used to return a list of all projects names
     if numberOfSegments == 3 {
         // Require authentication for project listing
         userID, authenticated := require_authentication(headers)
+        currentUser:= users.make_new_user(userID)
+
         if !authenticated {
             return make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED]), "Unauthorized - valid JWT token required\n"
+        }
+
+        // Check if user directory exists
+        userDirExists := config.user_directory_exists(userID)
+
+        // Ensure user directory structure exists before listing projects
+        if !userDirExists {
+            if !config.create_user_directory_structure(userID) {
+                return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]), "Request Failed: Unable to create user directory\n"
+            }
         }
 
         projectLibrary := projects.make_new_project_library()
@@ -600,12 +148,18 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
         // Only list projects for the authenticated user
         projectsList, success := projects.list_projects(projectLibrary, userID)
         if !success {
+            users.log_user_server_event(currentUser, users.make_new_server_event(
+            "Failed to fetch users owned Projects",
+            ServerEventType.ERROR, time.now(), true, "/api/v1/projects", .GET,))
             return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]), "Request Failed: Failed to list projects\n"
         }
         // defer delete(projectsList)
 
         if len(projectsList) == 0 {
             response := fmt.tprintf(`%s"user_id": "%s"%s`, "{", userID, "}")
+            users.log_user_server_event(currentUser, users.make_new_server_event(
+            "Successfully fetched Projects, but none were found",
+            ServerEventType.SUCCESS, time.now(), true, "/api/v1/projects", .GET,))
             return make_new_http_status(.OK, HttpStatusText[.OK]), response
         }
 
@@ -613,29 +167,25 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
         // defer delete(projectsJson)
 
         for project in projectsList {
-            // projectJson := fmt.tprintf("%s%s%s", "{",project,"}")
             projectJson := fmt.tprintf(`"%s"`, project)
             append(&projectsJson, projectJson)
         }
-
-        // //TODO: When testing The OstrichDB-JS SDK, returning the contents of
-        // // a Projects metadata(project.json) causes One of the "Project Lifecycle tests to fail."
-        // // This makes me think it best to not return this data but perhaps just the projects name?
-        // //Leaving code below commented in the event I re-instate it. For now just returning proj name
-        // //
-        // // But now when working with the OstrichDB return a specific index here is why the front end only sees one project...FUCK!!!
-
 
         // Format as JSON response with comma separation
         response := fmt.tprintf(`%s"projects": [%s], "user_id": "%s"%s`, "{",
         strings.join(projectsJson[:], ", "), userID, "}")
 
+
+        users.log_user_server_event(currentUser, users.make_new_server_event(
+        "Successfully fetched projects",
+        ServerEventType.SUCCESS, time.now(), true, "/api/v1/projects", .GET,))
         return make_new_http_status(.OK, HttpStatusText[.OK]), response
     }
 
 
     if numberOfSegments == 5 && segments[4] == "collections" {
         userID, authenticated := require_authentication(headers)
+        currentUser:= users.make_new_user(userID)
         if !authenticated {
             return make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED]), "Unauthorized - valid JWT token required\n"
         }
@@ -643,11 +193,17 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
         collectionsData, success := projects.list_collections_in_project_with_info(projectContext)
         // defer delete(collectionsData)
         if !success{
+            users.log_user_server_event(currentUser, users.make_new_server_event(
+            fmt.tprintf("Failed to fetch collections in Project: %s", projectContext.projectName),
+            ServerEventType.ERROR, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections", projectContext.projectName), .GET,))
             return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),  fmt.tprintf("Request Failed: Failed to fetch Collections in Project: %s\n", projectContext.projectName)
         }
 
         if len(collectionsData) == 0 {
             emptyResponse := fmt.tprintf("%s\"collections\": [], \"message\": \"No collections found\"%s", "{", "}")
+            users.log_user_server_event(currentUser, users.make_new_server_event(
+            fmt.tprintf("Successfully fetched Collections in Project: %s but none were found", projectContext.projectName),
+            ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections", projectContext.projectName), .GET,))
             return make_new_http_status(.OK, HttpStatusText[.OK]), emptyResponse
         }
 
@@ -677,6 +233,9 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
         }
 
         response := fmt.tprintf("%s\"collections\": [%s]%s", "{", strings.join(collectionsJson[:], ", "), "}")
+        users.log_user_server_event(currentUser, users.make_new_server_event(
+        fmt.tprintf("Successfully fetched Collections in Project: %s", projectContext.projectName),
+        ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections", projectContext.projectName), .GET,))
         return make_new_http_status(.OK, HttpStatusText[.OK]), response
     }
 
@@ -684,6 +243,7 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
     // Returns the contents of the specified collection
     if numberOfSegments == 6 && segments[4] == "collections" {
         userID, authenticated := require_authentication(headers)
+        currentUser:= users.make_new_user(userID)
         if !authenticated {
             return make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED]), "Unauthorized - valid JWT token required\n"
         }
@@ -694,12 +254,16 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
         // If confused just read over the `secure_collection_operation` declaration at the top of the file - Marshall
           return secure_collection_operation(projectContext, collectionName,
               proc(projCTX: ^lib.ProjectContext, colName: ^lib.Collection) -> (string, ^lib.Error) {
+                  currentUser:= users.make_new_user(projCTX.userID)
                   collection, fetchSuccess := fetch_collection(projCTX, colName)
                   if fetchSuccess != nil {
                       return "", fetchSuccess
                   }
 
                   if collection.body.isEmpty {
+                      users.log_user_server_event(currentUser, users.make_new_server_event(
+                      fmt.tprintf("Successfully fetched Collection: %s but no data was found", collection.name),
+                      ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s", projCTX.projectName, collection.name), .GET,))
                       return fmt.tprintf("Request Successful: No Clusters found in Collection: %s\n", collection.name), no_error()
                   }
 
@@ -712,6 +276,9 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
                       collection.fileSize,
                       "}")
 
+                  users.log_user_server_event(currentUser, users.make_new_server_event(
+                  fmt.tprintf("Successfully fetched Collection: %s", collection.name),
+                  ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s", projCTX.projectName, collection.name), .GET,))
                   return collectionJSON, no_error()
               })
     }
@@ -730,11 +297,16 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
         return secure_collection_operation(projectContext, collectionName,
             proc(projCTX: ^lib.ProjectContext, collection: ^lib.Collection) -> (string, ^lib.Error) {
                 clustersData, getClusterInfoError := get_all_clusters_info(projCTX, collection)
+
+                currentUser:= users.make_new_user(projCTX.userID)
                 if getClusterInfoError != nil {
                     return "", getClusterInfoError
                 }
 
                 if len(clustersData) == 0 {
+                    users.log_user_server_event(currentUser, users.make_new_server_event(
+                    fmt.tprintf("Successfully fetched Clusters within Collection: %s, but none were found", collection.name),
+                    ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters", projCTX.projectName, collection.name), .GET,))
                     return fmt.tprintf("Request Successful: No Clusters found within Collection: %s\n", collection.name), no_error()
                 }
 
@@ -753,6 +325,9 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
                 }
 
                 response := fmt.tprintf("%s\"clusters\": [%s]%s", "{", strings.join(clustersDataJSON[:], ", "), "}")
+                users.log_user_server_event(currentUser, users.make_new_server_event(
+                fmt.tprintf("Successfully fetched clusters within collection: %s", collection.name),
+                ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters", projCTX.projectName,collection.name), .GET,))
                 return response, no_error()
             })
     }
@@ -772,6 +347,7 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
         return secure_collection_operation(projectContext, collectionName, clusterName,
             proc(projCTX: ^lib.ProjectContext, collection: ^lib.Collection, cluster: ^lib.Cluster) -> (string, ^lib.Error) {
                 // Parse the decrypted collection to find the cluster
+                currentUser:= users.make_new_user(projCTX.userID)
                 parsedCollection, parseError := parse_entire_collection(projCTX, collection)
                 // defer free(&parsedCollection)
 
@@ -783,9 +359,13 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
                 for parsedCluster in parsedCollection.body.clusters {
                     if parsedCluster.name == cluster.name {
                         if parsedCluster.recordCount == 0 {
+                            users.log_user_server_event(currentUser, users.make_new_server_event(
+                            fmt.tprintf("Successfully fetched Records within Collection: %s Cluster: %s but none were found", collection.name, cluster.name),
+                            ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s",projCTX.projectName, collection.name, cluster.name), .GET,))
                             return fmt.tprintf("Request Successful: But, no records found in Cluster: %s in Collection: %s \n", cluster.name, collection.name), no_error()
                         }
 
+                        someNewRecord:= new(data.ParsedRecord)
                         // Build JSON response from parsed cluster data
                         jsonBuilder := strings.builder_make()
                         defer strings.builder_destroy(&jsonBuilder)
@@ -806,11 +386,19 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
                             } else {
                                 strings.write_string(&jsonBuilder, "    }\n")
                             }
+                            someNewRecord.name = record.name
+                            someNewRecord.typeAsString = record.typeAsString
+                            someNewRecord.value = record.value
                         }
 
                         strings.write_string(&jsonBuilder, "  ]\n")
                         strings.write_string(&jsonBuilder, "}")
 
+                        users.log_user_server_event(currentUser, users.make_new_server_event(
+                        fmt.tprintf("Successfully fetched Record: %s within Collection: %s Cluster: %s", someNewRecord.name,collection.name, cluster.name),
+                        ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s", projCTX.projectName,collection.name, cluster.name), .GET,))
+
+                        free(someNewRecord)
                         return strings.clone(strings.to_string(jsonBuilder)), no_error()
                     }
                 }
@@ -834,6 +422,8 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
         return secure_collection_operation(projectContext, collectionName, clusterName, path,
             proc(projCTX: ^lib.ProjectContext, collection: ^lib.Collection, cluster: ^lib.Cluster, requestPath: string) -> (string, ^lib.Error) {
                 // Check if there are actual query parameters (not just "?")
+                currentUser:= users.make_new_user(projCTX.userID)
+
                 queryString := extract_query_from_path(requestPath)
                 hasValidQueryParams := len(trim_space(queryString)) > 0 && contains(queryString, "=")
 
@@ -854,16 +444,19 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
                         queryParams.offset
                     )
                     // defer delete(records)
-
                     if !fetchSuccess {
                         return "", make_new_err(.RECORD_CANNOT_FILTER, get_caller_location())
                     }
 
                     if len(records) == 0 {
                         emptyResponse := fmt.tprintf("%s\"records\": [], \"message\": \"No records found matching criteria\"%s", "{", "}")
+                        users.log_user_server_event(currentUser, users.make_new_server_event(
+                        fmt.tprintf("Successfully queried for Record, but no results were found"),
+                        ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records?", projCTX.projectName, collection.name, cluster.name), .GET,))
+
                         return emptyResponse, no_error()
                     }
-
+                    someNewRecord:= new(data.ParsedRecord)
                     recordsDataJSON := make([dynamic]string)
                     // defer delete(recordsDataJSON)
 
@@ -872,6 +465,8 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
                         safeName := clean_metadata_field(record.name, "unnamed")
                         safeType := clean_metadata_field(record.typeAsString, "UNKNOWN")
                         safeValue := clean_metadata_field(record.value, "")
+
+                        someNewRecord.name = safeName
 
                         recordJSON := fmt.tprintf("%s\"id\": \"%d\", \"name\": \"%s\", \"type\": \"%s\", \"value\": \"%s\"%s",
                             "{",
@@ -889,6 +484,9 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
                     }
 
                     response := fmt.tprintf("%s\"records\": [%s]%s", "{", strings.join(recordsDataJSON[:], ", "), "}")
+                    users.log_user_server_event(currentUser, users.make_new_server_event(
+                    fmt.tprintf("Successfully queried for Record: %s", someNewRecord.name),
+                    ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records?",projCTX.projectName, collection.name, cluster.name, someNewRecord.name ), .GET,))
                     return response, no_error()
 
                 } else {
@@ -908,7 +506,9 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
                     // defer delete(recordsDataJSON)
 
                     // Fetch full record data for each record name
+
                     for recordName in recordNames {
+                        someNewRecord := make_new_record(collection, cluster, recordName)
                         newRecord := make_new_record(collection, cluster, recordName)
                         record, recordFetchSuccess := fetch_record(projCTX, collection, cluster, newRecord)
 
@@ -917,6 +517,8 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
                             safeName := clean_metadata_field(record.name, "unnamed")
                             safeType := clean_metadata_field(record.typeAsString, "UNKNOWN")
                             safeValue := clean_metadata_field(record.value, "")
+
+                            someNewRecord.name = safeName
 
                             recordJSON := fmt.tprintf("%s\"id\": \"%d\", \"name\": \"%s\", \"type\": \"%s\", \"value\": \"%s\"%s",
                                 "{",
@@ -932,6 +534,9 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
                         }
 
                         free(newRecord)
+                        users.log_user_server_event(currentUser, users.make_new_server_event(
+                        fmt.tprintf("Successfully queried for Record"),
+                        ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records%s",projCTX.projectName, collection.name, cluster.name, someNewRecord.name ), .GET,))
                     }
 
                     response := fmt.tprintf("%s\"records\": [%s]%s", "{", strings.join(recordsDataJSON[:], ", "), "}")
@@ -944,6 +549,8 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
     // Individual record access by ID or name
     if numberOfSegments == 10 && segments[4] == "collections" && segments[6] == "clusters" && segments[8] == "records" {
         userID, authenticated := require_authentication(headers)
+        currentUser:= users.make_new_user(userID)
+
         if !authenticated {
             return make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED]), "Unauthorized - valid JWT token required\n"
         }
@@ -962,8 +569,11 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
             // It's a numeric ID
             record, fetchSuccess := get_record_by_id(projectContext, newCollection, newCluster, recordID)
             if fetchSuccess != nil {
-                return make_new_http_status(.NOT_FOUND, HttpStatusText[.NOT_FOUND]),
-                       fmt.tprintf("Request Failed: Record with ID %d not found in Cluster: %s in Collection: %s\n", recordID, clusterName, collectionName)
+
+                users.log_user_server_event(currentUser, users.make_new_server_event(
+                fmt.tprintf("Failed to fetch record %d: ", record.id),
+                ServerEventType.ERROR, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records/%d", projectContext.projectName,collectionName, clusterName, record.id), .GET,))
+                return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]),fmt.tprintf("Request Failed: Record with ID %d not found in Cluster: %s in Collection: %s\n", recordID, clusterName, collectionName)
             }
 
             if len(record.value) == 0 {
@@ -980,6 +590,9 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
                 record.value,
                 "}")
 
+            users.log_user_server_event(currentUser, users.make_new_server_event(
+            fmt.tprintf("Successfully fetched Record %d: ", record.id),
+            ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records/%d", projectContext.projectName,collectionName, clusterName, record.id), .GET,))
             return make_new_http_status(.OK, HttpStatusText[.OK]), response
         } else {
             // It's a record name
@@ -989,11 +602,17 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
 
             record, fetchSuccess := fetch_record(projectContext, newCollection, newCluster, newRecord)
             if fetchSuccess != nil {
+                users.log_user_server_event(currentUser, users.make_new_server_event(
+                fmt.tprintf("Failed to fetch Record %s: ", record.name),
+                ServerEventType.ERROR, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records/%s", projectContext.projectName,collectionName, clusterName, record.name), .GET,))
                 return make_new_http_status(.NOT_FOUND, HttpStatusText[.NOT_FOUND]),
                        fmt.tprintf("Request Failed: Record '%s' not found in Cluster: %s in Collection: %s\n", recordName, clusterName, collectionName)
             }
 
             if len(record.value) == 0 {
+                users.log_user_server_event(currentUser, users.make_new_server_event(
+                fmt.tprintf("Successfully fetched record: %s, but no value assigned ", record.name),
+                ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records/%s",projectContext.projectName, collectionName, clusterName, record.name), .GET,))
                 return make_new_http_status(.PARTIAL_CONTENT, HttpStatusText[.PARTIAL_CONTENT]),
                        fmt.tprintf("Request Successful: Record found but no value assigned to Record: %s in Cluster: %s in Collection: %s\n", recordName, clusterName, collectionName)
             }
@@ -1014,6 +633,9 @@ handle_get_request:: proc(method: lib.HttpMethod, path: string, headers: map[str
                 record.value,
                 "}")
 
+            users.log_user_server_event(currentUser, users.make_new_server_event(
+            fmt.tprintf("Successfully fetched Record: %s", record.name),
+            ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records/%s",projectContext.projectName, collectionName, clusterName, record.name), .GET,))
             return make_new_http_status(.OK, HttpStatusText[.OK]), response
         }
     }
@@ -1035,9 +657,15 @@ handle_post_request:: proc(method: lib.HttpMethod, path: string, headers: map[st
 
    if len(segments) == 4 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "projects"  {
 
-       userID, authenticated := require_authentication(headers)
+       appConfig := config.get_config()
+       userID, authenticated, rateLimited := require_authentication_with_rate_limit(headers, appConfig.security.rateLimitRequestsPerMinute)
+
        if !authenticated {
            return make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED]), "Unauthorized - valid JWT token required\n"
+       }
+
+       if rateLimited {
+           return make_new_http_status(.TOO_MANY_REQUESTS, HttpStatusText[.TOO_MANY_REQUESTS]), "Rate limit exceeded - too many requests\n"
        }
 
 
@@ -1048,9 +676,16 @@ handle_post_request:: proc(method: lib.HttpMethod, path: string, headers: map[st
        return make_new_http_status(.CONFLICT, HttpStatusText[.CONFLICT]), fmt.tprintf("Request Failed: Missing project name\n")
    }
 
-   userID, authenticated := require_authentication(headers)
+   appConfig := config.get_config()
+   userID, authenticated, rateLimited := require_authentication_with_rate_limit(headers, appConfig.security.rateLimitRequestsPerMinute)
+   currentUser:= users.make_new_user(userID)
+
    if !authenticated {
        return make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED]), "Unauthorized - valid JWT token required\n"
+   }
+
+   if rateLimited {
+       return make_new_http_status(.TOO_MANY_REQUESTS, HttpStatusText[.TOO_MANY_REQUESTS]), "Rate limit exceeded - too many requests\n"
    }
 
    projectContext, projectContextOK := extract_project_context(path, headers)
@@ -1060,6 +695,33 @@ handle_post_request:: proc(method: lib.HttpMethod, path: string, headers: map[st
 
    numberOfSegments := len(segments)
 
+   //Route: /api/v1/projects/{projectID}/manual_query?value={query}
+   //Note:  This logic is only used to create a valid endpoint to then send it back to the requestor
+   //            which will then use the valid endpoint to make a proper DB operation request to the server
+   if numberOfSegments == 5  && segments[2] == "projects" && segments[4] == "manual_query"{
+
+       valueSegmentSplit:= strings.split(path, "?")
+       queryValue:= strings.split(valueSegmentSplit[1],"value=")
+        sanitizedQuery, _:= strings.replace(queryValue[1], "%20", " ", -1) //clean up the value
+
+       query, queryParseError := queries.parse_query(sanitizedQuery)
+       if queryParseError != nil do return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]), "Failed to parse query"
+       constructedEndpoint:= queries.query_to_endpoint_constructor(projectContext, query)
+
+       payload:= make_manual_query_payload(query, constructedEndpoint)
+
+       response := fmt.tprintf("%s\"method\": \"%s\", \"path\": \"%s\"%s",
+               "{",
+               payload.methodStr,
+               payload.path,
+               // payload.query,
+               "}")
+
+       return make_new_http_status(.OK, HttpStatusText[.OK]), response
+   }
+
+
+   //Route:  /api/v1/projects/{projectID}/collections/*
    if numberOfSegments == 6 && segments[4] == "collections" {
        collectionName := segments[5]
 
@@ -1069,6 +731,9 @@ handle_post_request:: proc(method: lib.HttpMethod, path: string, headers: map[st
        // First create the collection file
        createSuccess := create_collection_file(projectContext, newCollection)
        if createSuccess != nil {
+           users.log_user_server_event(currentUser, users.make_new_server_event(
+           fmt.tprintf("Failed to create Collection: %s", collectionName),
+           ServerEventType.ERROR, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s", projectContext.projectName, collectionName), .POST,))
            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]), fmt.tprintf("Request Failed: Failed to create collection %s\n", collectionName)
        }
 
@@ -1084,6 +749,9 @@ handle_post_request:: proc(method: lib.HttpMethod, path: string, headers: map[st
            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]), fmt.tprintf("Request Failed: Failed to encrypt collection %s\n", collectionName)
        }
 
+       users.log_user_server_event(currentUser, users.make_new_server_event(
+       fmt.tprintf("Successfully created Collection: %s", collectionName),
+       ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collection/%s", projectContext.projectName, collectionName), .POST,))
        return make_new_http_status(.CREATE, HttpStatusText[.CREATE]), tprintf("Request Successful: Created Collection '%s'\n", collectionName)
    }
 
@@ -1099,10 +767,18 @@ handle_post_request:: proc(method: lib.HttpMethod, path: string, headers: map[st
 
        return secure_collection_operation(projectContext, collectionName, clusterName,
            proc(projCTX: ^lib.ProjectContext, collection: ^lib.Collection, cluster: ^lib.Cluster) -> (string, ^lib.Error) {
+               currentUser:= users.make_new_user(projCTX.userID)
                fetchSuccess := data.create_cluster_block_in_collection(projCTX, collection, cluster)
                if fetchSuccess != nil {
-                   return "", fetchSuccess
+                   users.log_user_server_event(currentUser, users.make_new_server_event(
+                   fmt.tprintf("Failed to create Cluster: %s in Collection: %s",cluster.name, collection.name),
+                   ServerEventType.ERROR, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collection/%s/clusters/%s", projCTX.projectName, collection.name, cluster.name), .POST,))
+                   return fmt.tprintf("Request Failed: Failed to created Cluster: '%s' in Collection: %s\n", cluster.name, collection.name), fetchSuccess
                }
+
+               users.log_user_server_event(currentUser, users.make_new_server_event(
+               fmt.tprintf("Successfully created Cluster: %s in Collection: %s",cluster.name, collection.name),
+               ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collection/%s/clusters/%s", projCTX.projectName, collection.name, cluster.name), .POST,))
                return fmt.tprintf("Request Successful: Created Cluster: '%s' in Collection: %s\n", cluster.name, collection.name), no_error()
            })
    }
@@ -1131,6 +807,7 @@ handle_post_request:: proc(method: lib.HttpMethod, path: string, headers: map[st
 
        return secure_collection_operation(projectContext, collectionName, clusterName, recordName, queryParamsMap,
            proc(projCTX: ^lib.ProjectContext, collection: ^lib.Collection, cluster: ^lib.Cluster, record: ^lib.Record, queryParams: map[string]string) -> (string, ^lib.Error) {
+               currentUser:= users.make_new_user(projCTX.userID)
                typeToUpper := strings.to_upper(queryParams["type"])
 
                newRecordDataType: RecordDataTypes
@@ -1153,9 +830,16 @@ handle_post_request:: proc(method: lib.HttpMethod, path: string, headers: map[st
 
                creationSuccess:= create_record_within_cluster(projCTX, collection, cluster, record)
                if creationSuccess != nil{
-                   return "", creationSuccess
+                   users.log_user_server_event(currentUser, users.make_new_server_event(
+                   fmt.tprintf("Failed to create Record: %s Cluster: %s in Collection: %s", record.name, cluster.name, collection.name),
+                   ServerEventType.ERROR, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collection/%s/clusters/%s/record/%s?type=%s&value=%s", projCTX.projectName, collection.name, cluster.name, record.name, record.typeAsString, record.value), .POST,))
+                   return fmt.tprintf("Request Failed. Failed to create Record: %s in Cluster: %s in Collection: %s\n", record.name, cluster.name, collection.name), creationSuccess
                }
-               return fmt.tprintf("Request Successful:  Created Record: %s in Cluster: %s in Collection: %s\n", record.name, cluster.name, collection.name), no_error()
+
+               users.log_user_server_event(currentUser, users.make_new_server_event(
+               fmt.tprintf("Successfully created Record: %s Cluster: %s in Collection: %s", record.name, cluster.name, collection.name),
+               ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collection/%s/clusters/%s/record/%s?type=%s&value=%s", projCTX.projectName, collection.name, cluster.name, record.name, record.typeAsString, record.value), .POST,))
+               return fmt.tprintf("Request Successful. Created Record: %s in Cluster: %s in Collection: %s\n", record.name, cluster.name, collection.name), no_error()
            })
    }
 
@@ -1174,14 +858,48 @@ handle_delete_request:: proc(method: lib.HttpMethod, path: string, headers: map[
 
     segments := split_path_into_segments(path)
 
-    // Route: /api/v1/projects/{project_name}
-    //Delete a project of the passed in name
-    if len(segments) == 4 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "projects"  {
-        userID, authenticated := require_authentication(headers)
+    //Route: /api/v1/user/{user_id}
+    if len(segments) == 4 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "user"{
+        appConfig := config.get_config()
+        userID, authenticated, rateLimited := require_authentication_with_rate_limit(headers, appConfig.security.rateLimitRequestsPerMinute)
+        currentUser:= users.make_new_user(userID)
+
         if !authenticated {
             return make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED]), "Unauthorized - valid JWT token required\n"
         }
 
+        if rateLimited {
+            return make_new_http_status(.TOO_MANY_REQUESTS, HttpStatusText[.TOO_MANY_REQUESTS]), "Rate limit exceeded - too many requests\n"
+        }
+
+
+        if users.delete_user_account(currentUser) != nil{
+            users.log_user_server_event(currentUser, users.make_new_server_event(
+            "Failed to delete user",
+            ServerEventType.ERROR, time.now(), true, "/api/v1/user/", .DELETE,))
+            return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]), "Could not delete users account"
+        }else{
+            users.log_user_server_event(currentUser, users.make_new_server_event(
+            "Successfully deleted user",
+            ServerEventType.SUCCESS, time.now(), true, "/api/v1/user/", .DELETE,))
+            return make_new_http_status(.OK, HttpStatusText[.OK]), "Operation Successful: Safely deleted users account.\n"
+        }
+    }
+
+
+    // Route: /api/v1/projects/{project_name}
+    //Delete a project of the passed in name
+    if len(segments) == 4 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "projects"  {
+        appConfig := config.get_config()
+        userID, authenticated, rateLimited := require_authentication_with_rate_limit(headers, appConfig.security.rateLimitRequestsPerMinute)
+
+        if !authenticated {
+            return make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED]), "Unauthorized - valid JWT token required\n"
+        }
+
+        if rateLimited {
+            return make_new_http_status(.TOO_MANY_REQUESTS, HttpStatusText[.TOO_MANY_REQUESTS]), "Rate limit exceeded - too many requests\n"
+        }
 
         if len(segments[3]) != 0{
             args[0] = segments[3]
@@ -1190,9 +908,15 @@ handle_delete_request:: proc(method: lib.HttpMethod, path: string, headers: map[
         return make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED]), "Missing project name \n"
     }
 
-    userID, authenticated := require_authentication(headers)
+    appConfig := config.get_config()
+    userID, authenticated, rateLimited := require_authentication_with_rate_limit(headers, appConfig.security.rateLimitRequestsPerMinute)
+
     if !authenticated {
         return make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED]), "Unauthorized - valid JWT token required\n"
+    }
+
+    if rateLimited {
+        return make_new_http_status(.TOO_MANY_REQUESTS, HttpStatusText[.TOO_MANY_REQUESTS]), "Rate limit exceeded - too many requests\n"
     }
 
     // Extract project context for other operations
@@ -1201,7 +925,6 @@ handle_delete_request:: proc(method: lib.HttpMethod, path: string, headers: map[
         return make_new_http_status(.CONFLICT, HttpStatusText[.CONFLICT]), "Unauthorized or invalid project\n"
     }
     // defer free(projectContext)
-
     numberOfSegments := len(segments)
 
     // Route: /api/v1/projects/{project_name}/collections/{collection_name}
@@ -1217,10 +940,19 @@ handle_delete_request:: proc(method: lib.HttpMethod, path: string, headers: map[
 
         return secure_collection_operation(projectContext, collectionName,
             proc(projCTX: ^lib.ProjectContext, collection: ^lib.Collection) -> (string, ^lib.Error) {
+                currentUser:= users.make_new_user(projCTX.userID)
                 createSuccess := erase_collection(projCTX, collection)
                 if createSuccess != nil {
+                    users.log_user_server_event(currentUser, users.make_new_server_event(
+                    fmt.tprintf("Failed to delete Collection: %s in Project: %s", collection.name, projCTX.projectName),
+                    ServerEventType.ERROR, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s", projCTX.projectName, collection.name), .DELETE,))
+                    newHTTPStatus := make_new_http_status(.OK, HttpStatusText[.OK])
                     return "", createSuccess
                 }
+
+                users.log_user_server_event(currentUser, users.make_new_server_event(
+                fmt.tprintf("Successfully deleted Collection: %s in Project: %s", collection.name, projCTX.projectName),
+                ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s", projCTX.projectName, collection.name), .DELETE,))
                 return fmt.tprintf("Request Successful: Deleted Collection: %s\n", collection.name), no_error()
             })
     }
@@ -1239,10 +971,18 @@ handle_delete_request:: proc(method: lib.HttpMethod, path: string, headers: map[
 
         return secure_collection_operation(projectContext, collectionName, clusterName,
             proc(projCTX: ^lib.ProjectContext, collection: ^lib.Collection, cluster: ^lib.Cluster) -> (string, ^lib.Error) {
+                currentUser:= users.make_new_user(projCTX.userID)
                 deleteSuccess := data.erase_cluster(projCTX, collection, cluster)
                 if deleteSuccess != nil {
+                    users.log_user_server_event(currentUser, users.make_new_server_event(
+                    fmt.tprintf("Failed to delete Cluster: %s in Collection: %s in Project: %s", cluster.name,collection.name, projCTX.projectName),
+                    ServerEventType.ERROR, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s", projCTX.projectName, collection.name, cluster.name), .DELETE,))
                     return "", deleteSuccess
                 }
+
+                users.log_user_server_event(currentUser, users.make_new_server_event(
+                fmt.tprintf("Successfully deleted Cluster: %s in Collection: %s in Project: %s", cluster.name, collection.name, projCTX.projectName),
+                ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s", projCTX.projectName, collection.name, cluster.name), .DELETE,))
                 return fmt.tprintf("Request Successful: Deleted Cluster %s in Collection: %s\n", cluster.name, collection.name), no_error()
             })
     }
@@ -1263,10 +1003,18 @@ handle_delete_request:: proc(method: lib.HttpMethod, path: string, headers: map[
 
         return secure_collection_operation(projectContext, collectionName, clusterName, recordName,
             proc(projCTX: ^lib.ProjectContext, collection: ^lib.Collection, cluster: ^lib.Cluster, record: ^lib.Record) -> (string, ^lib.Error) {
+                currentUser:= users.make_new_user(projCTX.userID)
                 deleteSuccess:= data.erase_record(projCTX, collection, cluster, record)
                 if deleteSuccess != nil{
+                    users.log_user_server_event(currentUser, users.make_new_server_event(
+                    fmt.tprintf("Successfully deleted Record: %s Cluster: %s in Collection: %s in Project: %s", record.name ,cluster.name, collection.name, projCTX.projectName),
+                    ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records/%s", projCTX.projectName, collection.name, cluster.name, record.name), .DELETE,))
                     return "", deleteSuccess
                 }
+
+                users.log_user_server_event(currentUser, users.make_new_server_event(
+                fmt.tprintf("Successfully deleted Record: %s Cluster: %s in Collection: %s in Project: %s", record.name ,cluster.name, collection.name, projCTX.projectName),
+                ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records/%s", projCTX.projectName, collection.name, cluster.name, record.name), .DELETE,))
                 return fmt.tprintf("Request Successful: Delete Record: %s in Cluster: %s in Collection %s\n", record.name, cluster.name, collection.name), no_error()
             })
     }
@@ -1278,13 +1026,21 @@ handle_delete_request:: proc(method: lib.HttpMethod, path: string, headers: map[
 //Handle Updating data structures
 handle_put_request :: proc(method: lib.HttpMethod, path: string, headers: map[string]string, args: []string) -> (^lib.HttpStatus, string){
     using lib
+    using data
     using config
 
     if method != .PUT do return make_new_http_status(.BAD_REQUEST, HttpStatusText[.BAD_REQUEST]), "Method Not Allowed\n"
 
-    userID, authenticated := require_authentication(headers)
+    appConfig := get_config()
+    userID, authenticated, rateLimited := require_authentication_with_rate_limit(headers, appConfig.security.rateLimitRequestsPerMinute)
+    currentUser:= users.make_new_user(userID)
+
     if !authenticated {
         return make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED]), "Unauthorized - valid JWT token required\n"
+    }
+
+    if rateLimited {
+        return make_new_http_status(.TOO_MANY_REQUESTS, HttpStatusText[.TOO_MANY_REQUESTS]), "Rate limit exceeded - too many requests\n"
     }
 
     // Extract project context
@@ -1327,6 +1083,10 @@ handle_put_request :: proc(method: lib.HttpMethod, path: string, headers: map[st
         renameError:= projects.rename_project(projectContext, newProjPath)
         if renameError == nil {
             //Remove the old project.JSON file
+            users.log_user_server_event(currentUser, users.make_new_server_event(
+            fmt.tprintf("Successfully updated Project name: %s to %s ",projectContext.projectName, projectOldName[0]),
+            ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/?rename=%s",projectOldName[0], projectNewName ), .PUT,))
+
             oldJSONFile:= fmt.tprintf("%s/project.json", newProjPath)
             removeError:=os.remove(oldJSONFile)
             if removeError != nil{
@@ -1349,20 +1109,22 @@ handle_put_request :: proc(method: lib.HttpMethod, path: string, headers: map[st
             }
 
             //Make a new project.JSON file
-            _, openError:= os.open(fmt.tprintf("%s/project.json",newProjPath), os.O_CREATE, 0o666)
+            _, openError:= os.open(fmt.tprintf("%s/project.json",newProjPath), os.O_CREATE, FILE_MODE_RW_ALL)
             if openError != nil{
                  return  make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]), fmt.tprintf("Request Failed: There was a internal server side error in OstrichDB\n Could not create new project.json file" )
             }
 
-            //TODO: Unsure if I should store the following old metadata info in memory and then store it in the new project.json file
-            // - ProjectID
-            // - CreatedAt
-
             //Store the new project metadata
-            // //TODO: handle this fucking error - Marshall
             saveMetadataSuccess := projects.save_project_metadata(newProjContext, &metadata)
+            if !saveMetadataSuccess{
+                return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]), fmt.tprintf("Request Failed: Failed to updated Project: %s's metadata", projectOldName, projectNewName )
+            }
             return make_new_http_status(.OK, HttpStatusText[.OK]), fmt.tprintf("Request Successful: Renamed Project: %s to %s", projectOldName[0], projectNewName )
         }else{
+
+            users.log_user_server_event(currentUser, users.make_new_server_event(
+            fmt.tprintf("Failed to update Project name: %s to %s ",projectContext.projectName, projectOldName[0]),
+            ServerEventType.ERROR, time.now(), true, fmt.tprintf("/api/v1/projects/%s/?rename=%s",projectOldName[0], projectNewName ), .PUT,))
             return make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR]), fmt.tprintf("Request Failed: Failed to rename Project: %s to %s", projectOldName, projectNewName )
         }
     }
@@ -1371,6 +1133,7 @@ handle_put_request :: proc(method: lib.HttpMethod, path: string, headers: map[st
      if numberOfSegments == 6 && segments[2] == "projects"  && segments[4] == "collections"{
         // Require authentication for project listing
         userID, authenticated := require_authentication(headers)
+
         if !authenticated {
             return make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED]), "Unauthorized - valid JWT token required\n"
         }
@@ -1391,13 +1154,23 @@ handle_put_request :: proc(method: lib.HttpMethod, path: string, headers: map[st
 
         return secure_collection_operation(projectContext, oldCollectionName[0], queryParamsMap,
             proc(projCTX: ^lib.ProjectContext, collection: ^lib.Collection, queryParams: map[string]string) -> (string, ^lib.Error) {
+                currentUser:= users.make_new_user(projCTX.userID)
                 newCollectionName:=queryParams["rename"]
-                newCollectionPath:= fmt.tprintf("%scollections/%s", projCTX.basePath, newCollectionName)
 
-                renameResult := data.rename_collection(projCTX, collection, newCollectionPath)
+                newCollection:= make_new_collection(newCollectionName, .STANDARD)
+                newCollection.name = newCollectionName
+
+                renameResult := data.rename_collection(projCTX, collection, newCollection)
                 if renameResult != nil {
-                    return "", renameResult
+                    users.log_user_server_event(currentUser, users.make_new_server_event(
+                    fmt.tprintf("Failed to update Collection name: %s to %s ",collection.name, newCollectionName),
+                    ServerEventType.ERROR, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/?rename=%s",projCTX.projectName, collection.name, newCollectionName ), .PUT,))
+                    return fmt.tprintf("Request Failed: Failed to rename Collection: %s to %s", collection.name, newCollectionName), renameResult
                 }
+
+                users.log_user_server_event(currentUser, users.make_new_server_event(
+                fmt.tprintf("Successfully update Collection name: %s to %s ",collection.name, newCollectionName),
+                ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/?rename=%s",projCTX.projectName, collection.name, newCollectionName ), .PUT,))
                 return fmt.tprintf("Request Successful: Successfully renamed Collection: %s to %s", collection.name, newCollectionName), no_error()
             })
      }
@@ -1427,12 +1200,20 @@ handle_put_request :: proc(method: lib.HttpMethod, path: string, headers: map[st
 
           return secure_collection_operation(projectContext, collectionName, oldClusterName[0], queryParamsMap,
               proc(projCTX: ^lib.ProjectContext, collection: ^lib.Collection, cluster: ^lib.Cluster, queryParams: map[string]string) -> (string, ^lib.Error) {
+                  currentUser:= users.make_new_user(projCTX.userID)
                   newClusterName:=queryParams["rename"]
 
                   renameSuccess:= data.rename_cluster(projCTX, collection, cluster, newClusterName)
                   if renameSuccess != nil {
+                      users.log_user_server_event(currentUser, users.make_new_server_event(
+                      fmt.tprintf("Failed to update Cluster name: %s to %s ",cluster.name, newClusterName),
+                      ServerEventType.ERROR, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/?rename=%s",projCTX.projectName, collection.name, collection.name, cluster.name, newClusterName), .PUT,))
                       return "", renameSuccess
                   }
+
+                  users.log_user_server_event(currentUser, users.make_new_server_event(
+                  fmt.tprintf("Successfully updated Cluster name: %s to %s ",cluster.name, newClusterName),
+                  ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/?rename=%s",projCTX.projectName, collection.name, collection.name, cluster.name, newClusterName), .PUT,))
                   return fmt.tprintf("Request Successful: Renamed Cluster: %s to %s", cluster.name, newClusterName), no_error()
               })
     }
@@ -1458,31 +1239,54 @@ handle_put_request :: proc(method: lib.HttpMethod, path: string, headers: map[st
 
         return secure_collection_operation(projectContext, collectionName, clusterName, recordName[0], queryParamsMap,
             proc(projCTX: ^lib.ProjectContext, collection: ^lib.Collection, cluster: ^lib.Cluster, record: ^lib.Record, queryParams: map[string]string) -> (string, ^lib.Error) {
+
+                currentUser:= users.make_new_user(projCTX.userID)
                 //Go over the params to determine which operation to perform
                 for paramKey, paramValue in queryParams {
                     switch paramKey {
                     case "rename":
                         //Handle updating the Records name
-                        renameSuccess:= data.rename_reocord(projCTX, collection, cluster, record, paramValue)
+                        renameSuccess:= data.rename_record(projCTX, collection, cluster, record, paramValue)
                         if renameSuccess != nil {
+                            users.log_user_server_event(currentUser, users.make_new_server_event(
+                            fmt.tprintf("Failed to update Record name: %s to %s ",record.name, paramValue),
+                            ServerEventType.ERROR, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records/%s/?rename=%s",projCTX.projectName, collection.name, collection.name, cluster.name, record.name, paramValue), .PUT,))
                             return "", renameSuccess
                         }
+
+                        users.log_user_server_event(currentUser, users.make_new_server_event(
+                        fmt.tprintf("Successfully updated Record name: %s to %s ",record.name, paramValue),
+                        ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records/%s/?rename=%s",projCTX.projectName, collection.name, collection.name, cluster.name, record.name, paramValue), .PUT,))
                         return fmt.tprintf("Request Successful: Successfully renamed Record: %s to %s", record.name, paramValue), no_error()
 
                     case "type":
                         //Handle updating the Records type
                         typeUpdateSuccess:= data.update_record_data_type(projCTX, collection, cluster, record, paramValue)
                         if typeUpdateSuccess != nil {
+                            users.log_user_server_event(currentUser, users.make_new_server_event(
+                            fmt.tprintf("Failed to update Record: %s's type: %s to %s ",record.name, record.typeAsString, paramValue),
+                            ServerEventType.ERROR, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records/%s/?type=%s",projCTX.projectName, collection.name, collection.name, cluster.name, record.name, paramValue), .PUT,))
                             return "", typeUpdateSuccess
                         }
+
+                        users.log_user_server_event(currentUser, users.make_new_server_event(
+                        fmt.tprintf("Successfully update Record: %s's type: %s to %s ",record.name, record.typeAsString, paramValue),
+                        ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records/%s/?type=%s",projCTX.projectName, collection.name, collection.name, cluster.name, record.name, paramValue), .PUT,))
                         return fmt.tprintf("Request Successful: Successfully updated Record: %s's type to %s", record.name, paramValue), no_error()
 
                     case "value":
                         //Handle updating the records value
                         valueUpdateSuccess:= data.update_record_value(projCTX, collection, cluster, record, paramValue)
                         if valueUpdateSuccess != nil {
+                            users.log_user_server_event(currentUser, users.make_new_server_event(
+                            fmt.tprintf("Failed to update Record: %s's value: %s to %s ",record.name, record.value, paramValue),
+                            ServerEventType.ERROR, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records/%s/?value=%s",projCTX.projectName, collection.name, collection.name, cluster.name, record.name, paramValue), .PUT,))
                             return "", valueUpdateSuccess
                         }
+
+                        users.log_user_server_event(currentUser, users.make_new_server_event(
+                        fmt.tprintf("Successfully updated Record: %s's value: %s to %s ",record.name, record.value, paramValue),
+                        ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s/collections/%s/clusters/%s/records/%s/?value=%s",projCTX.projectName, collection.name, collection.name, cluster.name, record.name, paramValue), .PUT,))
                         return fmt.tprintf("Request Successful: Successfully updated Record: %s's value", record.name), no_error()
                     }
                 }
@@ -1503,6 +1307,7 @@ handle_health_check :: proc(method: lib.HttpMethod, path: string, headers: map[s
         return newHTTPStatus, "Request Failed: Method not allowed\n"
     }
 
+    version, _:=  get_ost_version()
     uptime := newServerSession.total_runtime
     healthData:= fmt.tprintf(`
         %s
@@ -1512,13 +1317,9 @@ handle_health_check :: proc(method: lib.HttpMethod, path: string, headers: map[s
         "timestamp": "%v",
         "uptime_seconds": %v
         %s`,
-        "{", string(get_ost_version()), time.now(), uptime, "}")
-
-
+        "{", string(version), time.now(), uptime, "}")
     response := healthData
-
-    newHTTPStatus := make_new_http_status(.OK, HttpStatusText[.OK])
-    return newHTTPStatus, response
+    return make_new_http_status(.OK, HttpStatusText[.OK]), response
 }
 
 handle_create_project :: proc(headers: map[string]string, args: []string) -> (^lib.HttpStatus, string) {
@@ -1532,6 +1333,7 @@ handle_create_project :: proc(headers: map[string]string, args: []string) -> (^l
     }
 
     userID, authenticated := require_authentication(headers)
+    currentUser:= users.make_new_user(userID)
     if !authenticated || userID == "" {
         newHTTPStatus := make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED])
         return newHTTPStatus, "Authentication required\n"
@@ -1548,6 +1350,9 @@ handle_create_project :: proc(headers: map[string]string, args: []string) -> (^l
 
     // Initialize project structure (this will create user directory if needed)
     if !projects.init_project_structure(projectContext) {
+        users.log_user_server_event(currentUser, users.make_new_server_event(
+        "Failed to create project",
+        ServerEventType.ERROR, time.now(), true, "/api/v1/projects", .POST,))
         newHTTPStatus := make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR])
         return newHTTPStatus, "Failed to create project\n"
     }
@@ -1556,6 +1361,9 @@ handle_create_project :: proc(headers: map[string]string, args: []string) -> (^l
         projectContext.projectID, projectName, userID, "}")
 
     newHTTPStatus := make_new_http_status(.CREATE, HttpStatusText[.CREATE])
+    users.log_user_server_event(currentUser, users.make_new_server_event(
+    fmt.tprintf("Successfully created Project: %s", projectContext.projectName),
+    ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s", projectContext.projectName), .POST,))
     return newHTTPStatus, response
 }
 
@@ -1570,6 +1378,7 @@ handle_delete_project :: proc(headers: map[string]string, args: []string = {""})
     }
 
     userID, authenticated := require_authentication(headers)
+    currentUser:= users.make_new_user(userID)
     if !authenticated || userID == "" {
         newHTTPStatus := make_new_http_status(.UNAUTHORIZED, HttpStatusText[.UNAUTHORIZED])
         return newHTTPStatus, "Authentication required\n"
@@ -1592,13 +1401,20 @@ handle_delete_project :: proc(headers: map[string]string, args: []string = {""})
 
     eraseProjectSuccess := projects.erase_project(projectContext)
     if !eraseProjectSuccess {
+        users.log_user_server_event(currentUser, users.make_new_server_event(
+        fmt.tprintf("Failed to delete Project: %s", projectContext.projectName),
+        ServerEventType.ERROR, time.now(), true, fmt.tprintf("/api/v1/projects/%s", projectContext.projectName), .DELETE,))
         newHTTPStatus := make_new_http_status(.SERVER_ERROR, HttpStatusText[.SERVER_ERROR])
         return newHTTPStatus, "Failed to delete project\n"
     }
 
+    users.log_user_server_event(currentUser, users.make_new_server_event(
+    fmt.tprintf("Successfully delete Project: %s", projectContext.projectName),
+    ServerEventType.SUCCESS, time.now(), true, fmt.tprintf("/api/v1/projects/%s", projectContext.projectName), .DELETE,))
     newHTTPStatus := make_new_http_status(.OK, HttpStatusText[.OK])
     return newHTTPStatus, "Successfully deleted project\n"
 }
+
 
 //QUERY PARAM HELPER PROCS BELOW
 
@@ -1850,4 +1666,41 @@ clean_metadata_field :: proc(input: string, defaultValue: string) -> string {
     }
 
     return clone(cleanedStr)
+}
+
+
+ManualQueryPayload :: struct {
+    query : ^lib.Query,
+    path: string, //aka endpoint :)
+    method: lib.HttpMethod,
+    methodStr: string
+}
+
+make_manual_query_payload :: proc(query: ^lib.Query, path: string) -> ^ManualQueryPayload{
+    using lib
+
+    payload:= new(ManualQueryPayload)
+    payload.query = query
+    payload.path = path
+
+    #partial switch(query.commandToken){
+        case .NEW:
+            payload.method = .POST
+            payload.methodStr = HttpMethodString[.POST]
+            break
+        case .RENAME, .CHANGE_TYPE, .SET:
+            payload.method = .PUT
+            payload.methodStr = HttpMethodString[.PUT]
+            break
+        case .ERASE:
+            payload.method = .DELETE
+            payload.methodStr = HttpMethodString[.DELETE]
+            break
+        case .FETCH:
+            payload.method = .GET
+            payload.methodStr = HttpMethodString[.GET]
+            break
+    }
+
+    return payload
 }
